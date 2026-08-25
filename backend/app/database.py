@@ -46,8 +46,8 @@ class DBManager:
                 else:
                     print(f"[DATABASE] Supabase connection check failed: {e}")
                 
-                print("[DATABASE] Falling back to SQLite local engine.")
-                self.use_supabase = False
+                print("[DATABASE] CRITICAL: Supabase connection failed while SUPABASE_URL is configured. Halting startup to prevent SQLite fallback in production.")
+                raise RuntimeError(f"Database connection failed: {e}")
 
     # --- STORAGE HELPERS ---
     def upload_media_to_supabase(self, file_bytes: bytes, storage_path: str, mime_type: str) -> bool:
@@ -76,7 +76,8 @@ class DBManager:
         Creates a private signed access URL for a storage object.
         """
         if not self.use_supabase:
-            return f"/static/uploads/{storage_path}"
+            import os
+            return f"/static/uploads/{os.path.basename(storage_path)}"
         try:
             res = self.supabase_client.storage.from_("media").create_signed_url(
                 path=storage_path,
@@ -88,8 +89,9 @@ class DBManager:
                 return res.signed_url
             return res.get("signedURL", f"https://{settings.SUPABASE_URL}/storage/v1/object/sign/media/{storage_path}")
         except Exception as e:
+            import os
             print(f"[DATABASE] Signed URL creation failed: {e}")
-            return f"/static/uploads/{storage_path}"
+            return f"/static/uploads/{os.path.basename(storage_path)}"
 
     def _get_sqlite_db(self):
         db = SessionLocal()
@@ -618,6 +620,102 @@ class DBManager:
             data = [self._model_to_dict(x) for x in items]
             db.close()
             return data
+
+    def save_analyst_note(self, investigation_id: str, note_text: str, author: str = "System Operator"):
+        now = datetime.utcnow()
+        payload = {
+            "investigation_id": investigation_id,
+            "note": note_text,
+            "author": author,
+            "updated_at": now.isoformat()
+        }
+        
+        if self.use_supabase:
+            try:
+                # Check if analyst_notes table is accessible
+                res_check = self.supabase_client.table("analyst_notes").select("id").limit(1).execute()
+                existing = self.supabase_client.table("analyst_notes").select("id").eq("investigation_id", investigation_id).execute()
+                if existing.data:
+                    res = self.supabase_client.table("analyst_notes").update(payload).eq("investigation_id", investigation_id).execute()
+                else:
+                    db_payload = {
+                        **payload,
+                        "created_at": now.isoformat()
+                    }
+                    res = self.supabase_client.table("analyst_notes").insert(db_payload).execute()
+                return res.data[0] if res.data else None
+            except Exception as e:
+                print(f"[DATABASE] Supabase analyst_notes table error: {e}. Falling back to description column.")
+                serialized = json.dumps({
+                    "note": note_text,
+                    "author": author,
+                    "updated_at": now.isoformat(),
+                    "created_at": now.isoformat()
+                })
+                self.update_investigation(investigation_id, {"description": serialized})
+                return {"investigation_id": investigation_id, "note": note_text, "author": author, "updated_at": now.isoformat()}
+        else:
+            db = self._get_sqlite_db()
+            try:
+                from backend.app.models import AnalystNote
+                existing = db.query(AnalystNote).filter(AnalystNote.investigation_id == investigation_id).first()
+                if existing:
+                    existing.note = note_text
+                    existing.author = author
+                    existing.updated_at = now
+                else:
+                    new_note = AnalystNote(investigation_id=investigation_id, note=note_text, author=author, created_at=now, updated_at=now)
+                    db.add(new_note)
+                db.commit()
+                note_db = db.query(AnalystNote).filter(AnalystNote.investigation_id == investigation_id).first()
+                data = self._model_to_dict(note_db)
+                db.close()
+                return data
+            except Exception as e:
+                db.close()
+                print(f"[DATABASE] SQLite analyst_notes error: {e}")
+                return None
+
+    def get_analyst_note(self, investigation_id: str):
+        if self.use_supabase:
+            try:
+                res = self.supabase_client.table("analyst_notes").select("*").eq("investigation_id", investigation_id).execute()
+                if res.data:
+                    return res.data[0]
+            except Exception as e:
+                print(f"[DATABASE] Supabase analyst_notes fetch fallback: {e}")
+                
+            inv = self.get_investigation(investigation_id)
+            if inv and inv.get("description"):
+                try:
+                    data = json.loads(inv["description"])
+                    if isinstance(data, dict) and "note" in data:
+                        return data
+                except:
+                    pass
+            return {"note": "", "author": "System Operator", "updated_at": None, "created_at": None}
+        else:
+            db = self._get_sqlite_db()
+            try:
+                from backend.app.models import AnalystNote
+                note_db = db.query(AnalystNote).filter(AnalystNote.investigation_id == investigation_id).first()
+                data = self._model_to_dict(note_db) if note_db else None
+                db.close()
+                if data:
+                    return data
+            except Exception as e:
+                db.close()
+                print(f"[DATABASE] SQLite analyst_notes fetch error: {e}")
+            
+            inv = self.get_investigation(investigation_id)
+            if inv and inv.get("description"):
+                try:
+                    data = json.loads(inv["description"])
+                    if isinstance(data, dict) and "note" in data:
+                        return data
+                except:
+                    pass
+            return {"note": "", "author": "System Operator", "updated_at": None, "created_at": None}
 
     # Helper method to convert SQLAlchemy models to dicts
     def _model_to_dict(self, model_obj):

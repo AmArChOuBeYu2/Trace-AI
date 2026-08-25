@@ -163,7 +163,8 @@ class LangSearchProvider(SourceSearchProvider):
                 "crawl_timestamp": crawl_date,
                 "relevance_rank": idx + 1,
                 "classification_rationale": "Matched query terms inside LangSearch web index.",
-                "query": query
+                "query": query,
+                "timestamp_state": "Observed" if val.get("datePublished") else "Estimated"
             }
 
             results.append({

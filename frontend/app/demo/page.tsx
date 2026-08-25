@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, Suspense } from "react";
 import Link from "next/navigation";
-import { ArrowLeft, PlayCircle } from "lucide-react";
+import { ArrowLeft, PlayCircle, Loader2 } from "lucide-react";
 import InvestigationWorkspace, { WorkspaceData } from "@/components/investigation-workspace";
 
 export default function DemoPage() {
@@ -253,7 +253,16 @@ export default function DemoPage() {
         <span className="uppercase text-[9px] border border-white/30 px-1.5 py-0.5 rounded font-bold">DEMO ONLY</span>
       </div>
 
-      <InvestigationWorkspace data={demoData} isDemo={true} />
+      <Suspense fallback={
+        <div className="flex-1 flex flex-col items-center justify-center py-24 gap-4 bg-slate-50">
+          <Loader2 className="w-8 h-8 text-[#1b365d] animate-spin" />
+          <span className="text-slate-400 text-sm font-semibold tracking-wide">
+            Loading Sandbox Workspace...
+          </span>
+        </div>
+      }>
+        <InvestigationWorkspace data={demoData} isDemo={true} />
+      </Suspense>
     </div>
   );
 }

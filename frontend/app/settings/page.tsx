@@ -153,12 +153,10 @@ export default function SettingsPage() {
               <span>Reset to Default</span>
             </button>
           </div>
-
           <p className="text-xs text-slate-500 leading-relaxed bg-slate-50 p-4 border border-slate-200 rounded-lg">
             <HelpCircle className="w-4 h-4 text-[#1b365d] inline mr-1 shrink-0" />
-            Every calibration coefficient represents a subjective analytical weight assigned to forensic variables, and does <b>not</b> signify objective probabilities of manipulation or public influence.
+            <b>Note on Coefficients:</b> These controls represent analytical calibration weights, <b>not</b> objective probabilities of manipulation or public influence.
           </p>
-
           <div className="space-y-6 pt-2">
             <div className="space-y-2">
               <div className="flex justify-between text-xs">

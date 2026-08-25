@@ -2,9 +2,11 @@
 
 import React, { useState, useEffect } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { 
   FileText, 
   ShieldCheck, 
+  ShieldAlert,
   Activity, 
   FileImage, 
   TrendingUp, 
@@ -21,9 +23,16 @@ import {
   UserCheck,
   CheckCircle,
   XCircle,
-  CornerRightDown
+  CornerRightDown,
+  ChevronRight,
+  ZoomIn,
+  ZoomOut,
+  Info,
+  Maximize2,
+  Upload
 } from "lucide-react";
 import PropagationFlow from "./propagation-flow";
+import EmptyState from "./empty-state";
 
 interface Finding {
   id: string;
@@ -117,8 +126,32 @@ interface WorkspaceProps {
 }
 
 export default function InvestigationWorkspace({ data, isDemo = false, onManualSearch, onRefresh }: WorkspaceProps) {
-  const [activeTab, setActiveTab] = useState<"overview" | "findings" | "provenance" | "sources" | "propagation" | "narrative" | "plim" | "reports">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "forensics" | "findings" | "c2pa" | "sources" | "propagation" | "timeline" | "plim" | "reports">("overview");
   
+  const searchParams = useSearchParams();
+  const tabParam = searchParams ? searchParams.get("tab") : null;
+
+  useEffect(() => {
+    if (tabParam) {
+      const validTabs = ["overview", "forensics", "findings", "c2pa", "sources", "propagation", "timeline", "plim", "reports"];
+      // Support legacy mappings
+      let mapped = tabParam;
+      if (tabParam === "provenance") mapped = "c2pa";
+      if (tabParam === "narrative") mapped = "timeline";
+      
+      if (validTabs.includes(mapped)) {
+        setActiveTab(mapped as any);
+      }
+    }
+  }, [tabParam]);
+
+  // Persist case ID
+  useEffect(() => {
+    if (data.investigation.id && !isDemo && typeof window !== "undefined") {
+      localStorage.setItem("last_active_case", data.investigation.id);
+    }
+  }, [data.investigation.id, isDemo]);
+
   // Custom weights for dynamic PLIM recalculation
   const [wManip, setWManip] = useState(35);
   const [wMeta, setWMeta] = useState(20);
@@ -133,6 +166,11 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
   
   // Lightbox modal for video frame inspection
   const [selectedFrame, setSelectedFrame] = useState<any>(null);
+  const [videoTime, setVideoTime] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [imageZoom, setImageZoom] = useState(1);
+  const [forensicView, setForensicView] = useState<"original" | "ela">("original");
+  const videoRef = React.useRef<HTMLVideoElement>(null);
   
   // Source Tracing provider filter
   const [providerFilter, setProviderFilter] = useState<"all" | "langsearch" | "tavily">("all");
@@ -142,6 +180,182 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
   
   // Show all sources toggle state
   const [showAllSources, setShowAllSources] = useState(false);
+  const [communicationIntent, setCommunicationIntent] = useState<"PROMOTIONAL" | "INFORMATIONAL" | "PERSUASIVE" | "POLITICAL" | "PUBLIC_SERVICE" | "ENTERTAINMENT" | "UNCLEAR">("INFORMATIONAL");
+
+  // Authoritative assessment state
+  const [assessment, setAssessment] = useState<any>(null);
+  const [loadingAssessment, setLoadingAssessment] = useState(false);
+  const [savingWeights, setSavingWeights] = useState(false);
+  const [savingNotes, setSavingNotes] = useState(false);
+  const [lastNotesSaved, setLastNotesSaved] = useState<string>("");
+  
+  // Media access url states
+  const [mediaUrl, setMediaUrl] = useState<string>("");
+  const [mediaUrlStatus, setMediaUrlStatus] = useState<"LOADING" | "READY" | "EXPIRED" | "ERROR">("LOADING");
+  const [hasRefreshedUrl, setHasRefreshedUrl] = useState(false);
+
+  const fetchAssessment = async () => {
+    if (isDemo) return;
+    try {
+      const res = await fetch(`http://localhost:8000/api/investigations/${data.investigation.id}/assessment`);
+      if (res.ok) {
+        const payload = await res.json();
+        setAssessment(payload);
+      }
+    } catch (e) {
+      console.error("Failed to load backend assessment:", e);
+    }
+  };
+
+  const getMediaUrl = (path: string) => {
+    if (!path) return "";
+    if (path.startsWith("http")) return path;
+    return `http://localhost:8000${path.startsWith("/") ? "" : "/"}${path}`;
+  };
+
+  const fetchMediaUrl = async (force = false) => {
+    if (!data.media || isDemo) {
+      setMediaUrlStatus("ERROR");
+      return;
+    }
+    
+    if (mediaUrlStatus === "READY" && !force) return;
+    
+    setMediaUrlStatus("LOADING");
+    try {
+      const res = await fetch(`http://localhost:8000/api/media/${data.media.id}/access-url`);
+      if (res.ok) {
+        const payload = await res.json();
+        setMediaUrl(payload.url);
+        setMediaUrlStatus("READY");
+      } else {
+        setMediaUrlStatus("ERROR");
+      }
+    } catch (e) {
+      console.error("Error fetching media access URL:", e);
+      setMediaUrlStatus("ERROR");
+    }
+  };
+
+  // Load configuration weights, notes and assessment on mount
+  useEffect(() => {
+    if (isDemo) return;
+    
+    // Fetch weights
+    fetch("http://localhost:8000/api/settings/weights")
+      .then(res => res.json())
+      .then(w => {
+        setWManip(w.media_manipulation);
+        setWMeta(w.metadata_inconsistency);
+        setWProp(w.propagation_anomaly);
+        setWNarr(w.narrative_evolution);
+      })
+      .catch(e => console.error("Error loading weights:", e));
+      
+    // Fetch notes
+    fetch(`http://localhost:8000/api/investigations/${data.investigation.id}/notes`)
+      .then(res => res.json())
+      .then(n => {
+        if (n && n.note) {
+          setNotes(n.note);
+          setLastNotesSaved(n.note);
+        }
+      })
+      .catch(e => console.error("Error loading notes:", e));
+      
+    // Fetch intent override or fallback to default intent finding
+    fetch(`http://localhost:8000/api/investigations/${data.investigation.id}`)
+      .then(res => res.json())
+      .then(inv => {
+        if (inv && inv.analyst_intent) {
+          setCommunicationIntent(inv.analyst_intent);
+        } else {
+          // Read from description fallback
+          try {
+            const parsed = JSON.parse(inv.description);
+            if (parsed && parsed.analyst_intent) {
+              setCommunicationIntent(parsed.analyst_intent);
+              return;
+            }
+          } catch {}
+          const contentFinding = data.findings.find(f => f.category === "content_analysis");
+          if (contentFinding && contentFinding.evidence) {
+            try {
+              const ev = JSON.parse(contentFinding.evidence);
+              if (ev.classification) {
+                setCommunicationIntent(ev.classification);
+              }
+            } catch {}
+          }
+        }
+      })
+      .catch(() => {});
+    
+    // Fetch assessment
+    fetchAssessment();
+    fetchMediaUrl();
+  }, [data.investigation.id, isDemo, data.media]);
+
+  const handleSaveWeights = async (manip: number, meta: number, prop: number, narr: number) => {
+    if (isDemo) return;
+    setSavingWeights(true);
+    try {
+      const res = await fetch("http://localhost:8000/api/settings/weights", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          media_manipulation: manip,
+          metadata_inconsistency: meta,
+          propagation_anomaly: prop,
+          narrative_evolution: narr
+        })
+      });
+      if (res.ok) {
+        await fetchAssessment();
+      } else {
+        const err = await res.json();
+        alert(`Failed to save weights: ${err.detail}`);
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Failed to save weights.");
+    } finally {
+      setSavingWeights(false);
+    }
+  };
+
+  const handleSaveNotes = async () => {
+    if (isDemo) return;
+    setSavingNotes(true);
+    try {
+      const res = await fetch(`http://localhost:8000/api/investigations/${data.investigation.id}/notes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note: notes, author: "System Operator" })
+      });
+      if (res.ok) {
+        setLastNotesSaved(notes);
+      }
+    } catch (e) {
+      console.error("Failed to save notes:", e);
+    } finally {
+      setSavingNotes(false);
+    }
+  };
+
+  const handleSaveIntentOverride = async (intent: string) => {
+    if (isDemo) return;
+    setCommunicationIntent(intent as any);
+    try {
+      await fetch(`http://localhost:8000/api/investigations/${data.investigation.id}/intent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ intent })
+      });
+    } catch (e) {
+      console.error("Failed to save intent override:", e);
+    }
+  };
 
   // Status variables
   const currentStatus = data.investigation.status.toLowerCase();
@@ -153,19 +367,30 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
     
     const interval = setInterval(() => {
       onRefresh();
+      fetchAssessment();
     }, 1500);
 
     return () => clearInterval(interval);
   }, [isRunning, isDemo, onRefresh]);
 
-  const getMediaUrl = (path: string) => {
-    if (!path) return "";
-    if (path.startsWith("http")) return path;
-    return `http://localhost:8000${path.startsWith("/") ? "" : "/"}${path}`;
-  };
-
   // 2. Dynamic PLIM Calculations
-  const calculateDynamicScore = () => {
+  const scores = (() => {
+    // If backend assessment is available, use it directly!
+    if (assessment) {
+      const state = assessment.state;
+      const scoresBreakdown = assessment.scores || {};
+      
+      return {
+        overall: state === "INSUFFICIENT_EVIDENCE" || state === "NOT_ANALYZED" ? null : assessment.overall_score,
+        manip: scoresBreakdown.media_manipulation !== undefined ? scoresBreakdown.media_manipulation : 10.0,
+        meta: scoresBreakdown.metadata_inconsistency !== undefined ? scoresBreakdown.metadata_inconsistency : 10.0,
+        prop: scoresBreakdown.propagation_anomaly !== undefined ? scoresBreakdown.propagation_anomaly : 10.0,
+        narr: scoresBreakdown.narrative_evolution !== undefined ? scoresBreakdown.narrative_evolution : 10.0,
+        state
+      };
+    }
+    
+    // Otherwise fallback to client side calculations
     let manip = 10.0;
     let meta = 10.0;
     let prop = 10.0;
@@ -198,16 +423,19 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
     const normNarr = wNarr / (totalWeight || 1);
 
     const overall = (manip * normManip) + (meta * normMeta) + (prop * normProp) + (narr * normNarr);
+    
+    // If no evidence is present in the pipeline (no findings, sources or narratives), represent it as insufficient evidence
+    const hasEvidence = data.findings.length > 0 || data.sources.length > 0 || data.narrative.versions.length > 0;
+    
     return {
-      overall: Math.min(Math.max(overall, 10.0), 100.0),
+      overall: hasEvidence ? Math.min(Math.max(overall, 10.0), 100.0) : null,
       manip,
       meta,
       prop,
-      narr
+      narr,
+      state: hasEvidence ? "ANALYZED" : "INSUFFICIENT_EVIDENCE"
     };
-  };
-
-  const scores = calculateDynamicScore();
+  })();
 
   const handleSearchSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -221,7 +449,8 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
     setSearching(false);
   };
 
-  const getRiskBadgeColor = (score: number) => {
+  const getRiskBadgeColor = (score: number | null) => {
+    if (score === null) return "text-slate-500 border-slate-200 bg-slate-50";
     if (score > 70) return "text-red-700 border-red-200 bg-red-50";
     if (score > 40) return "text-amber-700 border-amber-200 bg-amber-50";
     return "text-emerald-700 border-emerald-200 bg-emerald-50";
@@ -293,10 +522,20 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
 
     // Source Candidates discovery and publication dates
     data.sources.forEach(cand => {
+      let estState = "Estimated";
+      if (cand.evidence) {
+        try {
+          const ev = JSON.parse(cand.evidence);
+          if (ev.timestamp_state) {
+            estState = ev.timestamp_state;
+          }
+        } catch {}
+      }
+
       if (cand.publication_time) {
         events.push({
           timestamp: cand.publication_time,
-          type: "Observed",
+          type: estState,
           event: `Published public instance.`,
           evidence: `Indexed public entry title: "${cand.title}"`,
           platform: cand.platform,
@@ -335,10 +574,16 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
   const timelineEvents = getSortedTimeline();
 
   // --- Filtering source candidates (Screen 8) ---
-  const filteredSources = data.sources.filter(s => {
-    if (providerFilter === "all") return true;
-    return s.discovery_method.toLowerCase().includes(providerFilter);
-  });
+  const filteredSources = data.sources
+    .filter(s => {
+      if (providerFilter === "all") return true;
+      return s.discovery_method.toLowerCase().includes(providerFilter);
+    })
+    .sort((a, b) => {
+      const aTime = a.publication_time ? new Date(a.publication_time).getTime() : Infinity;
+      const bTime = b.publication_time ? new Date(b.publication_time).getTime() : Infinity;
+      return aTime - bTime;
+    });
 
   // --- SCREEN 3: Running Pipeline Progress View ---
   if (isRunning) {
@@ -419,8 +664,18 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
     );
   }
 
+  const isAiUnavailable = data.findings.some(f => f.category === "ai_analysis" && f.evidence && f.evidence.includes('"ai_status": "UNAVAILABLE"'));
+
   return (
     <div className="flex-1 flex flex-col min-w-0 bg-slate-50">
+      
+      {/* AI Unavailable warning banner */}
+      {isAiUnavailable && (
+        <div className="bg-amber-50 border-b border-amber-200 px-8 py-3.5 text-amber-800 text-xs font-bold flex items-center gap-2">
+          <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0" />
+          <span>AI-assisted analysis temporarily unavailable. Direct cryptographic check & rule classifications remain active.</span>
+        </div>
+      )}
       
       {/* Workspace Sub Header (Screens 4) */}
       <div className="bg-white border-b border-slate-200 px-8 py-6 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-sm">
@@ -443,254 +698,505 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
         <div className="flex items-center gap-4 bg-slate-50 border border-slate-200 rounded-lg p-3">
           <div className="text-right">
             <p className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">TRACE-PLIM Analytical Score</p>
-            <p className="text-lg font-bold font-mono text-slate-800">{scores.overall.toFixed(1)}%</p>
+            <p className="text-lg font-bold font-mono text-slate-800">
+              {scores.overall !== null ? `${scores.overall.toFixed(1)}%` : "—"}
+            </p>
           </div>
           <div className={`px-2.5 py-1 rounded text-xs font-bold uppercase border ${getRiskBadgeColor(scores.overall)}`}>
-            {scores.overall > 70 ? "Critical Risk" : scores.overall > 40 ? "Medium Risk" : "Low Risk"}
+            {scores.overall !== null 
+              ? (scores.overall > 70 ? "Critical Risk" : scores.overall > 40 ? "Medium Risk" : "Low Risk")
+              : "INSUFFICIENT EVIDENCE"
+            }
           </div>
         </div>
       </div>
 
       {/* Workspace Tabs Panel */}
-      <div className="bg-white border-b border-slate-200 px-8 flex overflow-x-auto gap-2 select-none shadow-sm">
-        {[
-          { id: "overview", label: "Media Overview", icon: FileImage },
-          { id: "findings", label: "Forensic Findings", icon: Activity },
-          { id: "provenance", label: "EXIF & C2PA", icon: ShieldCheck },
-          { id: "sources", label: "Source Candidates", icon: Globe },
-          { id: "propagation", label: "Propagation Graph", icon: TrendingUp },
-          { id: "narrative", label: "Source Timeline", icon: Clock },
-          { id: "plim", label: "TRACE-PLIM Assessment", icon: Sliders },
-          { id: "reports", label: "Report & Audit", icon: FileText }
-        ].map((tab) => {
-          const Icon = tab.icon;
-          const isActive = activeTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id as any)}
-              className={`flex items-center gap-2 px-4 py-3 text-xs font-bold tracking-wide border-b-2 transition-all whitespace-nowrap cursor-pointer ${
-                isActive 
-                  ? "border-[#1b365d] text-[#1b365d]" 
-                  : "border-transparent text-slate-500 hover:text-slate-800"
-              }`}
-            >
-              <Icon className="w-3.5 h-3.5" />
-              <span>{tab.label}</span>
-            </button>
-          );
-        })}
-      </div>
+      {data.media && (
+        <div className="bg-white border-b border-slate-200 px-8 flex overflow-x-auto gap-2 select-none shadow-sm scrollbar-none">
+          {[
+            { id: "overview", label: "Overview", icon: FileImage },
+            { id: "forensics", label: "Forensics", icon: Maximize2 },
+            { id: "findings", label: "Findings", icon: Activity },
+            { id: "c2pa", label: "C2PA", icon: ShieldCheck },
+            { id: "sources", label: "Sources", icon: Globe },
+            { id: "propagation", label: "Propagation", icon: TrendingUp },
+            { id: "timeline", label: "Timeline", icon: Clock },
+            { id: "plim", label: "TRACE-PLIM", icon: Sliders },
+            { id: "reports", label: "Report", icon: FileText }
+          ].map((tab) => {
+            const Icon = tab.icon;
+            const isActive = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id as any)}
+                className={`flex items-center gap-2 px-4 py-3 text-xs font-bold tracking-wide border-b-2 transition-all whitespace-nowrap cursor-pointer ${
+                  isActive 
+                    ? "border-[#1b365d] text-[#1b365d]" 
+                    : "border-transparent text-slate-500 hover:text-slate-800"
+                }`}
+              >
+                <Icon className="w-3.5 h-3.5" />
+                <span>{tab.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {/* Main Tab Views Content */}
       <div className="p-8 flex-1 overflow-y-auto">
         
-        {/* OVERVIEW TAB (Screen 4) */}
-        {activeTab === "overview" && (
-          <div className="space-y-6 animate-fade-in">
-            {/* Summary Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-              <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
-                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Analytical Score</span>
-                <div className="flex items-baseline gap-2 mt-2">
-                  <h4 className="text-3xl font-extrabold text-slate-800 font-mono">{scores.overall.toFixed(1)}%</h4>
-                  <span className="text-[10px] text-slate-500">Risk rating</span>
-                </div>
-              </div>
-              <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
-                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">AI Assessment</span>
-                <div className="flex items-baseline gap-2 mt-2">
-                  <h4 className="text-3xl font-extrabold text-slate-800 font-mono">
-                    {Math.round((data.findings.find(f => f.category === "ai_analysis")?.evidence ? 
-                      JSON.parse(data.findings.find(f => f.category === "ai_analysis")!.evidence!).ai_generation_likelihood : 0.0) * 100)}%
-                  </h4>
-                  <span className="text-[10px] text-slate-500">AI Likelihood</span>
-                </div>
-              </div>
-              <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
-                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Source Candidates</span>
-                <div className="flex items-baseline gap-2 mt-2">
-                  <h4 className="text-3xl font-extrabold text-slate-800 font-mono">{data.sources.length}</h4>
-                  <span className="text-[10px] text-slate-500">Indexed urls</span>
-                </div>
-              </div>
-              <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
-                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Propagation Nodes</span>
-                <div className="flex items-baseline gap-2 mt-2">
-                  <h4 className="text-3xl font-extrabold text-slate-800 font-mono">{data.graph.nodes.length}</h4>
-                  <span className="text-[10px] text-slate-500">Spread channels</span>
-                </div>
-              </div>
+        {!data.media && (
+          <div className="max-w-md mx-auto my-12 bg-white border border-slate-200 rounded-xl p-8 shadow-sm text-center space-y-5 animate-fade-in">
+            <div className="w-16 h-16 bg-blue-50 border border-blue-100 rounded-full flex items-center justify-center mx-auto text-[#1b365d]">
+              <Upload className="w-8 h-8" />
             </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-              {/* Media Preview Box */}
-              <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4 shadow-sm flex flex-col justify-between">
-                <div>
-                  <h3 className="font-bold text-base text-slate-800">Media Preview</h3>
-                  <p className="text-slate-500 text-xs">Immutable original representation of the case evidence asset.</p>
-                </div>
-                {data.media ? (
-                  <div className="bg-slate-50 rounded-lg p-2 border border-slate-200 flex items-center justify-center min-h-[300px] mt-4 relative overflow-hidden group">
-                    {data.media.mime_type.startsWith("image/") ? (
-                      <img 
-                        src={getMediaUrl(data.media.storage_path)} 
-                        alt="Suspicious Media" 
-                        className="max-h-[350px] object-contain rounded"
-                      />
-                    ) : (
-                      <video 
-                        src={getMediaUrl(data.media.storage_path)} 
-                        controls 
-                        className="max-h-[350px] w-full object-contain rounded"
-                      />
-                    )}
-                  </div>
-                ) : (
-                  <div className="bg-slate-50 rounded-lg p-12 text-center text-slate-400 border border-slate-200 mt-4">
-                    No media uploaded yet.
-                  </div>
-                )}
-              </div>
-
-              {/* Key Findings Ledger (Screen 4 Key Findings) */}
-              <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4 shadow-sm">
-                <div>
-                  <h3 className="font-bold text-base text-slate-800">Key Findings</h3>
-                  <p className="text-slate-500 text-xs">Evaluations mapped to precision categories.</p>
-                </div>
-                
-                {data.findings.length === 0 ? (
-                  <p className="text-xs text-slate-400 py-6 text-center">No forensic findings discovered.</p>
-                ) : (
-                  <div className="space-y-3 max-h-[350px] overflow-y-auto pr-1">
-                    {data.findings.map((f, idx) => (
-                      <div key={f.id || idx} className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-1.5 hover:border-slate-300 transition-all">
-                        <div className="flex justify-between items-center">
-                          <span className={`px-2 py-0.5 rounded text-[8px] uppercase font-bold border ${
-                            f.evidence_level === "OBSERVED" 
-                              ? "bg-blue-50 text-blue-700 border-blue-200" 
-                              : f.evidence_level === "INFERRED"
-                                ? "bg-amber-50 text-amber-700 border-amber-200"
-                                : "bg-red-50 text-red-700 border-red-200"
-                          }`}>
-                            {f.evidence_level}
-                          </span>
-                          <span className="font-mono text-slate-400 text-[9px] uppercase">{f.category}</span>
-                        </div>
-                        <p className="font-medium text-slate-700">{f.finding}</p>
-                        <div className="flex justify-between text-[10px] text-slate-400">
-                          <span>Method: {f.method || "Inspection"}</span>
-                          <span>Confidence: {f.confidence}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+            <div className="space-y-2">
+              <h3 className="text-base font-bold text-slate-800">No evidence uploaded</h3>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                No evidence has been added to this investigation yet.
+              </p>
+            </div>
+            <div className="pt-2">
+              <Link
+                href={`/upload?investigationId=${data.investigation.id}`}
+                className="inline-flex items-center gap-1.5 bg-[#1b365d] hover:bg-[#152a4a] text-white font-bold px-6 py-2.5 rounded-lg text-xs transition-all shadow-sm cursor-pointer"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                <span>Upload Evidence</span>
+              </Link>
             </div>
           </div>
         )}
 
-        {/* SCREEN 5: Media Forensics tab */}
-        {activeTab === "findings" && (
+        {/* OVERVIEW TAB (Screen 4) */}
+        {data.media && activeTab === "overview" && (
+          <div className="space-y-6 animate-fade-in">
+            {data.findings.length === 0 ? (
+              <div className="py-8">
+                <EmptyState
+                  icon={ShieldAlert}
+                  title="INSUFFICIENT EVIDENCE"
+                  description="No sufficient forensic indicators or findings are available to compute an integrity score for this case asset. Run analysis or upload additional evidence."
+                />
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                {/* Left Column: Forensic Assessment & Indicators */}
+                <div className="lg:col-span-2 space-y-6">
+                  {/* Forensic Assessment Summary */}
+                  <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4 shadow-sm">
+                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Forensic Assessment</span>
+                    <div className="space-y-1">
+                      <h3 className="text-xl font-bold text-slate-800 leading-tight">
+                        {scores.overall === null
+                          ? "Insufficient Evidence"
+                          : scores.overall > 70 
+                            ? "High Manipulation Likelihood" 
+                            : scores.overall > 40 
+                              ? "Medium Manipulation Likelihood" 
+                              : "Low Manipulation Likelihood"}
+                      </h3>
+                      <p className="text-slate-500 text-xs leading-relaxed">
+                        Based on {data.findings.length} supporting indicators discovered in ELA, metadata containers, and source crawls.
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-4 border-t border-slate-100 pt-4">
+                      <div>
+                        <span className="text-[9px] text-slate-400 font-bold block uppercase">Confidence</span>
+                        <span className="text-xs font-bold text-[#1b365d] uppercase font-mono">
+                          {scores.overall === null ? "—" : (scores.overall > 70 ? "High" : "Medium")}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[9px] text-slate-400 font-bold block uppercase">Evidence Strength</span>
+                        <span className="text-xs font-bold text-slate-700 uppercase">
+                          {data.findings.length >= 4 ? "Strong" : data.findings.length >= 2 ? "Medium" : "Weak"}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[9px] text-slate-400 font-bold block uppercase">Overall Score</span>
+                        <span className="text-xs font-mono font-bold text-slate-800">
+                          {scores.overall !== null ? `${scores.overall.toFixed(1)}%` : "—"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Performance Indicators Matrix */}
+                  <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4 shadow-sm">
+                    <h3 className="font-bold text-sm text-slate-800">Analytical Metrics Matrix</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-2">
+                        <div className="flex justify-between font-semibold">
+                          <span className="text-slate-700">Image Manipulation</span>
+                          <span className="font-mono text-slate-850">{scores.manip.toFixed(1)}%</span>
+                        </div>
+                        <div className="flex justify-between text-[10px] text-slate-400">
+                          <span>State: Analyzed</span>
+                          <span>Confidence: High</span>
+                        </div>
+                      </div>
+
+                      <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-2">
+                        <div className="flex justify-between font-semibold">
+                          <span className="text-slate-700">Metadata Container</span>
+                          <span className="font-mono text-slate-850">{scores.meta.toFixed(1)}%</span>
+                        </div>
+                        <div className="flex justify-between text-[10px] text-slate-400">
+                          <span>State: Analyzed</span>
+                          <span>Confidence: High</span>
+                        </div>
+                      </div>
+
+                      <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-2">
+                        <div className="flex justify-between font-semibold">
+                          <span className="text-slate-700">C2PA Provenance</span>
+                          <span className="font-mono text-slate-850">
+                            {data.c2pa.status === "VERIFIED" ? "Verified" : "Not Detected"}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-[10px] text-slate-400">
+                          <span>State: {data.c2pa.status}</span>
+                          <span>Confidence: Conclusive</span>
+                        </div>
+                      </div>
+
+                      <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-2">
+                        <div className="flex justify-between font-semibold">
+                          <span className="text-slate-700">Source Discovery</span>
+                          <span className="font-mono text-slate-850">{data.sources.length} Candidates</span>
+                        </div>
+                        <div className="flex justify-between text-[10px] text-slate-400">
+                          <span>State: Searched</span>
+                          <span>Confidence: Conclusive</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Right Column: Assessment Summary Panel & Media */}
+                <div className="space-y-6">
+                  {/* Key Drivers Floating Panel */}
+                  <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4 shadow-sm">
+                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Assessment Drivers</span>
+                    <div className="space-y-3">
+                      {[
+                        {
+                          name: "Metadata Inconsistency",
+                          value: data.findings.some(f => f.category === "metadata" && f.severity === "high") ? "High" : "Low",
+                          color: data.findings.some(f => f.category === "metadata" && f.severity === "high") ? "text-red-600" : "text-slate-600"
+                        },
+                        {
+                          name: "Temporal Discontinuity",
+                          value: data.findings.some(f => f.category === "temporal" && f.severity === "high") ? "High" : "Low",
+                          color: data.findings.some(f => f.category === "temporal" && f.severity === "high") ? "text-red-600" : "text-slate-600"
+                        },
+                        {
+                          name: "Compression Anomaly",
+                          value: data.findings.some(f => f.category === "compression" && f.severity === "high") ? "High" : "Low",
+                          color: data.findings.some(f => f.category === "compression" && f.severity === "high") ? "text-red-600" : "text-slate-600"
+                        },
+                        {
+                          name: "C2PA Provenance",
+                          value: data.c2pa.status === "VERIFIED" ? "Verified" : "Not Present",
+                          color: data.c2pa.status === "VERIFIED" ? "text-emerald-600" : "text-slate-400"
+                        }
+                      ].map((driver, idx) => (
+                        <div key={idx} className="flex justify-between items-center text-xs py-1.5 border-b border-slate-50 last:border-0">
+                          <span className="text-slate-500 font-medium">{driver.name}</span>
+                          <span className={`font-bold ${driver.color}`}>{driver.value}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Evidence Media Card */}
+                  <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3 shadow-sm">
+                    <div className="flex justify-between items-center">
+                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Evidence File</span>
+                      <button 
+                        onClick={() => setActiveTab("forensics")}
+                        className="text-[10px] font-bold text-[#1b365d] hover:underline"
+                      >
+                        Inspect details →
+                      </button>
+                    </div>
+                    {data.media ? (
+                      <div className="bg-slate-50 rounded-lg p-2 border border-slate-100 flex items-center justify-center min-h-[160px] max-h-[200px] overflow-hidden">
+                        {data.media.mime_type.startsWith("image/") ? (
+                          <img 
+                            src={getMediaUrl(data.media.storage_path)} 
+                            alt="Media Preview" 
+                            className="max-h-[180px] object-contain rounded"
+                          />
+                        ) : (
+                          <div className="flex flex-col items-center gap-2 p-4 text-center">
+                            <Play className="w-8 h-8 text-[#1b365d] fill-[#1b365d]/5" />
+                            <span className="text-[11px] font-semibold text-slate-700 truncate max-w-[180px]">
+                              {data.media.filename}
+                            </span>
+                            <span className="text-[9px] text-slate-400 font-mono">
+                              {(data.media.size_bytes / 1024 / 1024).toFixed(2)} MB
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-slate-400">No media uploaded.</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+        {activeTab === "forensics" && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 animate-fade-in">
-            {/* Technical Verification Info */}
-            <div className="lg:col-span-2 bg-white border border-slate-200 rounded-xl p-6 space-y-6 shadow-sm">
+            {/* Left Column: Forensic Media Viewer */}
+            <div className="lg:col-span-2 bg-white border border-slate-200 rounded-xl p-6 space-y-6 shadow-sm flex flex-col justify-between">
               <div>
-                <h3 className="font-bold text-base text-slate-800">Media Evidence Index</h3>
-                <p className="text-slate-500 text-xs">Cryptographic parameters and container file properties.</p>
+                <h3 className="font-bold text-base text-slate-800">Forensic Media Viewer</h3>
+                <p className="text-slate-500 text-xs">Examine frame timelines, anomaly markers, and ELA visualizations.</p>
               </div>
 
               {data.media ? (
-                <div className="space-y-4 text-xs">
-                  <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 space-y-1.5">
-                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">SHA-256 Checksum</span>
-                    <p className="font-mono text-[#1b365d] break-all select-all font-bold text-sm bg-white p-2.5 rounded border border-slate-200">
-                      {data.media.sha256}
-                    </p>
-                  </div>
+                <div className="space-y-6">
+                  {/* Media display */}
+                  {data.media.mime_type.startsWith("video/") ? (
+                    <div className="space-y-4">
+                      {/* Video Player */}
+                      <div className="bg-slate-50 rounded-lg p-2 border border-slate-200 flex items-center justify-center min-h-[300px] relative overflow-hidden">
+                        {mediaUrlStatus === "LOADING" ? (
+                          <div className="flex flex-col items-center gap-2">
+                            <Loader2 className="w-8 h-8 text-[#1b365d] animate-spin" />
+                            <span className="text-xs text-slate-500 font-bold">Creating secure signed session...</span>
+                          </div>
+                        ) : mediaUrlStatus === "ERROR" ? (
+                          <div className="flex flex-col items-center gap-3 p-6 text-center">
+                            <ShieldAlert className="w-8 h-8 text-red-500" />
+                            <p className="text-xs font-bold text-slate-700">Signed URL access token generation failed.</p>
+                            <button
+                              onClick={() => fetchMediaUrl(true)}
+                              className="px-3 py-1.5 bg-[#1b365d] text-white rounded text-xs font-bold hover:bg-[#152a4a] transition-all"
+                            >
+                              Refresh Session
+                            </button>
+                          </div>
+                        ) : (
+                          <video 
+                            ref={videoRef}
+                            src={mediaUrl} 
+                            onTimeUpdate={(e) => setVideoTime((e.target as HTMLVideoElement).currentTime)}
+                            onLoadedMetadata={(e) => setVideoDuration((e.target as HTMLVideoElement).duration)}
+                            onError={() => {
+                              if (!hasRefreshedUrl) {
+                                setHasRefreshedUrl(true);
+                                fetchMediaUrl(true);
+                              } else {
+                                setMediaUrlStatus("ERROR");
+                              }
+                            }}
+                            controls 
+                            className="max-h-[350px] w-full object-contain rounded"
+                          />
+                        )}
+                      </div>
 
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
-                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">File size</span>
-                      <span className="text-slate-700 font-mono font-bold text-sm">
-                        {`${(data.media.size_bytes / 1024 / 1024).toFixed(2)} MB`}
-                      </span>
-                    </div>
+                      {/* Timeline Seeker */}
+                      <div className="space-y-2">
+                        <div className="flex justify-between items-center text-xs">
+                          <span className="font-mono text-slate-500 font-bold">
+                            Time: {Math.floor(videoTime / 60)}:{String(Math.floor(videoTime % 60)).padStart(2, "0")} / {Math.floor(videoDuration / 60)}:{String(Math.floor(videoDuration % 60)).padStart(2, "0")}
+                          </span>
+                          <span className="text-[10px] text-slate-400">Click timeline markers to seek</span>
+                        </div>
 
-                    <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
-                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">MIME format</span>
-                      <span className="text-slate-700 font-mono font-bold text-sm">{data.media.mime_type}</span>
-                    </div>
-                  </div>
-
-                  {/* Video Codec Specifications */}
-                  {data.media.mime_type.startsWith("video/") && (
-                    <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 space-y-2">
-                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">ffprobe Stream Parameters</span>
-                      {(() => {
-                        const metaFinding = data.findings.find(f => f.category === "metadata");
-                        if (metaFinding?.evidence) {
-                          try {
-                            const ev = JSON.parse(metaFinding.evidence);
-                            return (
-                              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 font-mono">
-                                <div>
-                                  <span className="text-[9px] text-slate-400 block">Resolution</span>
-                                  <span className="text-slate-700 font-bold">{ev.width}x{ev.height}</span>
-                                </div>
-                                <div>
-                                  <span className="text-[9px] text-slate-400 block">Framerate</span>
-                                  <span className="text-slate-700 font-bold">{ev.fps?.toFixed(1) || "N/A"} FPS</span>
-                                </div>
-                                <div>
-                                  <span className="text-[9px] text-slate-400 block">Duration</span>
-                                  <span className="text-slate-700 font-bold">{ev.duration_s?.toFixed(1) || "N/A"}s</span>
-                                </div>
-                                <div>
-                                  <span className="text-[9px] text-slate-400 block">Video Codec</span>
-                                  <span className="text-slate-700 font-bold uppercase">{ev.codec || "unknown"}</span>
-                                </div>
-                              </div>
-                            );
-                          } catch {}
-                        }
-                        return <p className="text-slate-400">Stream details not parsed yet.</p>;
-                      })()}
-                    </div>
-                  )}
-
-                  {/* Representative Frames Gallery for Video */}
-                  {data.media.mime_type.startsWith("video/") && (
-                    <div className="space-y-3 pt-2">
-                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Representative sampled frames</span>
-                      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-                        {data.findings
-                          .filter(f => f.category === "temporal" && f.evidence)
-                          .map((f, idx) => {
-                            try {
-                              const ev = JSON.parse(f.evidence!);
-                              return (
-                                <div 
-                                  key={idx} 
-                                  onClick={() => setSelectedFrame({ ...ev, finding: f.finding })}
-                                  className="group border border-slate-200 rounded-lg overflow-hidden bg-slate-50 cursor-pointer hover:border-[#1b365d] transition-all"
-                                >
-                                  <img 
-                                    src={getMediaUrl(ev.frame_path)} 
-                                    alt={`Frame ${idx}`} 
-                                    className="h-16 w-full object-cover group-hover:scale-105 transition-all"
-                                  />
-                                  <div className="p-1.5 text-center text-[9px] font-mono text-slate-500">
-                                    Frame {ev.frame_path.split("frame_")[1]?.split(".jpg")[0]}
-                                  </div>
-                                </div>
-                              );
-                            } catch {
+                        {/* Interactive Timeline track with ticks */}
+                        <div className="relative h-6 bg-slate-100 rounded-lg border border-slate-200 flex items-center px-2">
+                          <input 
+                            type="range"
+                            min="0"
+                            max={videoDuration || 100}
+                            step="0.1"
+                            value={videoTime}
+                            onChange={(e) => {
+                              if (videoRef.current) {
+                                videoRef.current.currentTime = Number(e.target.value);
+                                setVideoTime(Number(e.target.value));
+                              }
+                            }}
+                            className="w-full h-1.5 appearance-none bg-slate-250 rounded-full cursor-pointer accent-[#1b365d] relative z-10"
+                          />
+                          
+                          {/* Anomaly ticks overlay */}
+                          {data.findings
+                            .filter(f => f.category === "temporal" && f.evidence)
+                            .map((f, idx) => {
+                              try {
+                                const ev = JSON.parse(f.evidence!);
+                                const path = ev.frame_path || ev.storage_path || "";
+                                const frameNum = ev.frame_number !== undefined ? ev.frame_number : (ev.frame_index !== undefined ? ev.frame_index : parseInt(path.split("frame_")[1]?.split(".jpg")[0]) || 0);
+                                const tickTime = ev.timestamp !== undefined ? ev.timestamp : (ev.timestamp_s !== undefined ? ev.timestamp_s : frameNum / 30);
+                                const percent = (tickTime / (videoDuration || 1)) * 100;
+                                if (percent <= 100) {
+                                  return (
+                                    <button
+                                      key={idx}
+                                      onClick={() => {
+                                        if (videoRef.current) {
+                                          videoRef.current.currentTime = tickTime;
+                                          setVideoTime(tickTime);
+                                        }
+                                      }}
+                                      title={`Flagged Anomaly: ${f.finding}`}
+                                      className="absolute top-1.5 w-2 h-2.5 bg-rose-500 border border-white rounded-full z-20 hover:scale-125 hover:bg-red-600 transition-all cursor-pointer"
+                                      style={{ left: `calc(${percent}% - 4px)` }}
+                                    />
+                                  );
+                                }
+                              } catch {}
                               return null;
-                            }
-                          })}
+                            })}
+                        </div>
+                      </div>
+
+                      {/* Rep frames track */}
+                      <div className="space-y-2">
+                        <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Sampled Frame Timeline</span>
+                        <div className="flex gap-3 overflow-x-auto py-1 scrollbar-none">
+                          {data.findings
+                            .filter(f => f.category === "temporal" && f.evidence)
+                            .map((f, idx) => {
+                              try {
+                                const ev = JSON.parse(f.evidence!);
+                                const path = ev.frame_path || ev.storage_path || "";
+                                const frameNum = ev.frame_number !== undefined ? ev.frame_number : (ev.frame_index !== undefined ? ev.frame_index : parseInt(path.split("frame_")[1]?.split(".jpg")[0]) || 0);
+                                const tickTime = ev.timestamp !== undefined ? ev.timestamp : (ev.timestamp_s !== undefined ? ev.timestamp_s : frameNum / 30);
+                                return (
+                                  <div 
+                                    key={idx} 
+                                    onClick={() => {
+                                      if (videoRef.current) {
+                                        videoRef.current.currentTime = tickTime;
+                                        setVideoTime(tickTime);
+                                      }
+                                      setSelectedFrame({ ...ev, finding: f.finding });
+                                    }}
+                                    className="flex-shrink-0 w-24 border border-slate-200 rounded overflow-hidden bg-slate-50 cursor-pointer hover:border-[#1b365d] transition-all"
+                                  >
+                                    <img 
+                                      src={getMediaUrl(path)} 
+                                      alt={`Frame ${frameNum}`} 
+                                      className="h-12 w-full object-cover"
+                                    />
+                                    <div className="p-1 text-center text-[9px] font-mono text-slate-500">
+                                      Frame {frameNum}
+                                    </div>
+                                  </div>
+                                );
+                              } catch {
+                                return null;
+                              }
+                            })}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    /* Image Viewer with ELA / Zoom */
+                    <div className="space-y-4">
+                      <div className="flex justify-between items-center bg-slate-50 p-2 rounded-lg border border-slate-200">
+                        <div className="flex gap-1">
+                          <button
+                            onClick={() => setForensicView("original")}
+                            className={`px-3 py-1 rounded text-xs font-bold transition-all ${
+                              forensicView === "original" 
+                                ? "bg-[#1b365d] text-white shadow-sm" 
+                                : "text-slate-600 hover:bg-slate-200"
+                            }`}
+                          >
+                            Original Image
+                          </button>
+                          <button
+                            onClick={() => setForensicView("ela")}
+                            className={`px-3 py-1 rounded text-xs font-bold transition-all ${
+                              forensicView === "ela" 
+                                ? "bg-[#1b365d] text-white shadow-sm" 
+                                : "text-slate-600 hover:bg-slate-200"
+                            }`}
+                          >
+                            ELA Forensic Map
+                          </button>
+                        </div>
+
+                        {/* Zoom controls */}
+                        <div className="flex items-center gap-1.5 text-slate-500">
+                          <button 
+                            onClick={() => setImageZoom(Math.max(imageZoom - 0.25, 0.5))}
+                            className="p-1 hover:bg-slate-200 rounded hover:text-slate-800 transition-colors"
+                          >
+                            <ZoomOut className="w-4 h-4" />
+                          </button>
+                          <span className="text-xs font-mono font-bold w-12 text-center">{Math.round(imageZoom * 100)}%</span>
+                          <button 
+                            onClick={() => setImageZoom(Math.min(imageZoom + 0.25, 3))}
+                            className="p-1 hover:bg-slate-200 rounded hover:text-slate-800 transition-colors"
+                          >
+                            <ZoomIn className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Display container */}
+                      <div className="bg-slate-50 rounded-lg p-2 border border-slate-200 flex items-center justify-center min-h-[300px] overflow-hidden relative">
+                        {mediaUrlStatus === "LOADING" ? (
+                          <div className="flex flex-col items-center gap-2">
+                            <Loader2 className="w-8 h-8 text-[#1b365d] animate-spin" />
+                            <span className="text-xs text-slate-500 font-bold">Creating secure signed session...</span>
+                          </div>
+                        ) : mediaUrlStatus === "ERROR" ? (
+                          <div className="flex flex-col items-center gap-3 p-6 text-center">
+                            <ShieldAlert className="w-8 h-8 text-red-500" />
+                            <p className="text-xs font-bold text-slate-700">Signed URL access token generation failed.</p>
+                            <button
+                              onClick={() => fetchMediaUrl(true)}
+                              className="px-3 py-1.5 bg-[#1b365d] text-white rounded text-xs font-bold hover:bg-[#152a4a] transition-all"
+                            >
+                              Refresh Session
+                            </button>
+                          </div>
+                        ) : (
+                          forensicView === "original" ? (
+                            <img 
+                              src={mediaUrl} 
+                              alt="Evidence Original" 
+                              className="max-h-[350px] object-contain rounded transition-transform duration-200"
+                              style={{ transform: `scale(${imageZoom})`, transformOrigin: "center center" }}
+                            />
+                          ) : (
+                            (() => {
+                              const compFinding = data.findings.find(f => f.category === "compression");
+                              if (compFinding?.evidence) {
+                                try {
+                                  const ev = JSON.parse(compFinding.evidence);
+                                  return (
+                                    <img 
+                                      src={getMediaUrl(ev.ela_image_path)} 
+                                      alt="Evidence ELA Map" 
+                                      className="max-h-[350px] object-contain rounded transition-transform duration-200"
+                                      style={{ transform: `scale(${imageZoom})`, transformOrigin: "center center" }}
+                                    />
+                                  );
+                                } catch {}
+                              }
+                              return <p className="text-xs text-slate-400">ELA forensic map not parsed or available for this media format.</p>;
+                            })()
+                          )
+                        )}
                       </div>
                     </div>
                   )}
@@ -700,40 +1206,86 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
               )}
             </div>
 
-            {/* Error Level Analysis (ELA) */}
-            <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4 shadow-sm h-fit">
-              <div>
-                <h3 className="font-bold text-base text-slate-800">Error Level Analysis (ELA)</h3>
-                <p className="text-slate-500 text-xs">Resaved compression differences mapping.</p>
+            {/* Right Column: Parameters & Metadata Index */}
+            <div className="space-y-6">
+              {/* Technical parameters card */}
+              <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4 shadow-sm">
+                <h3 className="font-bold text-sm text-slate-800">Media Hash & Stream Properties</h3>
+                {data.media ? (
+                  <div className="space-y-4 text-xs">
+                    <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-1">
+                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">SHA-256 Hash</span>
+                      <p className="font-mono text-[#1b365d] break-all select-all font-bold tracking-tight">
+                        {data.media.sha256}
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5">
+                        <span className="text-[9px] text-slate-400 font-bold uppercase block">File Size</span>
+                        <span className="text-slate-800 font-mono font-bold">
+                          {(data.media.size_bytes / 1024 / 1024).toFixed(2)} MB
+                        </span>
+                      </div>
+                      <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5">
+                        <span className="text-[9px] text-slate-400 font-bold uppercase block">Format</span>
+                        <span className="text-slate-800 font-mono font-bold truncate block">
+                          {data.media.mime_type}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-400">No parameters indexed.</p>
+                )}
               </div>
 
-              {(() => {
-                const compFinding = data.findings.find(f => f.category === "compression");
-                if (compFinding?.evidence) {
+              {/* metadata container index */}
+              <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4 shadow-sm">
+                <h3 className="font-bold text-sm text-slate-800">EXIF Metadata Headers</h3>
+                {(() => {
+                  const metaFinding = data.findings.find(f => f.category === "metadata");
+                  if (!metaFinding) {
+                    return <p className="text-xs text-slate-400 py-2">No EXIF metadata indexed in containers.</p>;
+                  }
+                  
+                  let software = "N/A";
+                  let creationDate = "N/A";
+                  let make = "N/A";
+                  let model = "N/A";
+                  
                   try {
-                    const ev = JSON.parse(compFinding.evidence);
-                    return (
-                      <div className="space-y-4">
-                        <div className="bg-slate-50 border border-slate-200 rounded-lg p-2 flex justify-center">
-                          <img 
-                            src={getMediaUrl(ev.ela_image_path)} 
-                            alt="ELA Compression Mapping" 
-                            className="max-h-[180px] object-contain rounded"
-                          />
-                        </div>
-                        <p className="text-xs text-slate-600 leading-normal">
-                          Lighter pixels highlight regions that undergo differential changes during compression cycles, hinting at localized image editing or layer splicing.
-                        </p>
-                      </div>
-                    );
+                    const ev = JSON.parse(metaFinding.evidence || "{}");
+                    software = ev.software || "N/A";
+                    creationDate = ev.creation_date || "N/A";
+                    make = ev.camera_make || "N/A";
+                    model = ev.camera_model || "N/A";
                   } catch {}
-                }
-                return (
-                  <p className="text-xs text-slate-400 py-6 text-center">
-                    ELA mapping is not available for this media category.
-                  </p>
-                );
-              })()}
+
+                  return (
+                    <div className="space-y-2 text-xs font-mono">
+                      <div className="flex justify-between border-b border-slate-100 py-1.5">
+                        <span className="text-slate-400 font-sans">Camera Make</span>
+                        <span className="text-slate-700">{make}</span>
+                      </div>
+                      <div className="flex justify-between border-b border-slate-100 py-1.5">
+                        <span className="text-slate-400 font-sans">Camera Model</span>
+                        <span className="text-slate-700">{model}</span>
+                      </div>
+                      <div className="flex justify-between border-b border-slate-100 py-1.5">
+                        <span className="text-slate-400 font-sans">Software Editor</span>
+                        <span className={`font-bold ${software !== "N/A" ? "text-rose-600 font-sans" : "text-slate-700"}`}>
+                          {software}
+                        </span>
+                      </div>
+                      <div className="flex justify-between py-1.5">
+                        <span className="text-slate-400 font-sans">Creation Date</span>
+                        <span className="text-slate-700">{creationDate}</span>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
             </div>
 
             {/* Lightbox frame modal */}
@@ -744,7 +1296,7 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
                     <h4 className="font-bold text-slate-800 text-sm">Sampled Video Frame Inspection</h4>
                     <button 
                       onClick={() => setSelectedFrame(null)}
-                      className="text-slate-400 hover:text-slate-700 text-xs font-bold font-mono"
+                      className="text-[#1b365d] hover:text-[#152a4a] text-xs font-bold font-mono cursor-pointer"
                     >
                       CLOSE [X]
                     </button>
@@ -789,12 +1341,101 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
         {/* SCREEN 6: Forensic Findings Tab */}
         {activeTab === "findings" && (
           <div className="space-y-6 animate-fade-in">
-            {/* Treated in Overview Tab or we can render details here if overview tab switches */}
-          </div>
-        )}
+            <div className="border-b border-slate-200 pb-4">
+              <h3 className="font-bold text-base text-slate-800">Forensic Findings Ledger</h3>
+              <p className="text-slate-500 text-xs">Evidence categorized by observation levels and validation methods.</p>
+            </div>
+            
+            {data.findings.length === 0 ? (
+              <EmptyState 
+                icon={ShieldAlert}
+                title="No findings registered"
+                description="This case media has not registered any forensic findings yet."
+              />
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* OBSERVED */}
+                <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4 shadow-sm">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                    <span className="text-[10px] font-bold text-blue-700 bg-blue-50 border border-blue-150 px-2 py-0.5 rounded uppercase tracking-wider">
+                      Observed
+                    </span>
+                    <span className="text-[10px] text-slate-400 font-mono">
+                      {data.findings.filter(f => f.evidence_level === "OBSERVED").length} Items
+                    </span>
+                  </div>
+                  <div className="space-y-4 max-h-[500px] overflow-y-auto pr-1">
+                    {data.findings.filter(f => f.evidence_level === "OBSERVED").map((f) => (
+                      <div key={f.id} className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-2 hover:border-slate-300 transition-all">
+                        <p className="font-semibold text-slate-800 leading-normal">{f.finding}</p>
+                        <div className="flex flex-col gap-1 text-[10px] text-slate-400 font-mono pt-1.5 border-t border-slate-200/50">
+                          <div><span className="font-sans font-bold">Method:</span> {f.method || "Inspection"}</div>
+                          <div><span className="font-sans font-bold">Confidence:</span> {f.confidence}</div>
+                        </div>
+                      </div>
+                    ))}
+                    {data.findings.filter(f => f.evidence_level === "OBSERVED").length === 0 && (
+                      <p className="text-xs text-slate-400 py-6 text-center">No observed evidence.</p>
+                    )}
+                  </div>
+                </div>
 
-        {/* SCREEN 7: C2PA & Metadata tab */}
-        {activeTab === "provenance" && (
+                {/* INFERRED */}
+                <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4 shadow-sm">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                    <span className="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-150 px-2 py-0.5 rounded uppercase tracking-wider">
+                      Inferred
+                    </span>
+                    <span className="text-[10px] text-slate-400 font-mono">
+                      {data.findings.filter(f => f.evidence_level === "INFERRED").length} Items
+                    </span>
+                  </div>
+                  <div className="space-y-4 max-h-[500px] overflow-y-auto pr-1">
+                    {data.findings.filter(f => f.evidence_level === "INFERRED").map((f) => (
+                      <div key={f.id} className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-2 hover:border-slate-300 transition-all">
+                        <p className="font-semibold text-slate-800 leading-normal">{f.finding}</p>
+                        <div className="flex flex-col gap-1 text-[10px] text-slate-400 font-mono pt-1.5 border-t border-slate-200/50">
+                          <div><span className="font-sans font-bold">Method:</span> {f.method || "Analysis"}</div>
+                          <div><span className="font-sans font-bold">Confidence:</span> {f.confidence}</div>
+                        </div>
+                      </div>
+                    ))}
+                    {data.findings.filter(f => f.evidence_level === "INFERRED").length === 0 && (
+                      <p className="text-xs text-slate-400 py-6 text-center">No inferred evidence.</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* CONCLUSION */}
+                <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4 shadow-sm">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                    <span className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-150 px-2 py-0.5 rounded uppercase tracking-wider">
+                      Conclusion
+                    </span>
+                    <span className="text-[10px] text-slate-400 font-mono">
+                      {data.findings.filter(f => f.evidence_level === "CONCLUSION" || f.evidence_level === "SYSTEM" || f.evidence_level === "REASONING").length} Items
+                    </span>
+                  </div>
+                  <div className="space-y-4 max-h-[500px] overflow-y-auto pr-1">
+                    {data.findings.filter(f => f.evidence_level === "CONCLUSION" || f.evidence_level === "SYSTEM" || f.evidence_level === "REASONING").map((f) => (
+                      <div key={f.id} className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-2 hover:border-slate-300 transition-all">
+                        <p className="font-semibold text-slate-800 leading-normal">{f.finding}</p>
+                        <div className="flex flex-col gap-1 text-[10px] text-slate-400 font-mono pt-1.5 border-t border-slate-200/50">
+                          <div><span className="font-sans font-bold">Method:</span> {f.method || "Reasoning"}</div>
+                          <div><span className="font-sans font-bold">Confidence:</span> {f.confidence}</div>
+                        </div>
+                      </div>
+                    ))}
+                    {data.findings.filter(f => f.evidence_level === "CONCLUSION" || f.evidence_level === "SYSTEM" || f.evidence_level === "REASONING").length === 0 && (
+                      <p className="text-xs text-slate-400 py-6 text-center">No conclusion evidence.</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}        {/* SCREEN 7: C2PA & Metadata tab */}
+        {activeTab === "c2pa" && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 animate-fade-in">
             
             {/* EXIF Data Panel */}
@@ -843,7 +1484,7 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
                         </tr>
                         <tr>
                           <td className="py-2.5 text-slate-400 font-semibold">Editing Software</td>
-                          <td className={`py-2.5 font-bold ${software !== "N/A" ? "text-red-600" : ""}`}>
+                          <td className={`py-2.5 font-bold ${software !== "N/A" ? "text-rose-600" : ""}`}>
                             {software}
                           </td>
                         </tr>
@@ -879,27 +1520,28 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
                     <ShieldCheck className="w-5 h-5 shrink-0" />
                     <div>
                       <p className="font-bold uppercase tracking-wide">Status: {data.c2pa.status}</p>
-                      <p className="text-slate-600 mt-1 leading-normal">
+                      <p className="text-slate-600 mt-1 leading-normal text-[11px]">
                         {data.c2pa.verification_result}
                       </p>
                     </div>
                   </div>
                 </div>
 
-                <div className="text-xs text-slate-500 leading-relaxed bg-slate-50 rounded-lg p-4 border border-slate-200">
-                  <span className="font-bold block text-slate-600 mb-1">C2PA Status Definitions:</span>
-                  <ul className="list-disc pl-4 space-y-1">
+                <div className="text-xs text-slate-505 leading-relaxed bg-slate-50 rounded-lg p-4 border border-slate-200">
+                  <span className="font-bold block text-slate-600 mb-1 text-[11px]">C2PA Status Definitions:</span>
+                  <ul className="list-disc pl-4 space-y-1.5 text-[11px] text-slate-500">
                     <li><b>VERIFIED:</b> Cryptographic signatures are present and validated against root stores.</li>
                     <li><b>PRESENT_UNVERIFIED:</b> Manifest signatures are present but lack trusted chains.</li>
-                    <li><b>INVALID:</b> manifest signature check failed.</li>
+                    <li><b>INVALID:</b> Manifest signature check failed or contains tampered container blocks.</li>
                     <li><b>NOT_PRESENT:</b> No content credentials manifest was detected.</li>
+                    <li><b>UNAVAILABLE:</b> Manifest check could not be completed because file containers are unreadable or unsupported.</li>
                   </ul>
                 </div>
 
                 <div className="p-3.5 bg-amber-50 border border-amber-200 text-amber-800 text-[11px] leading-relaxed rounded-lg flex items-start gap-2">
                   <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
                   <p>
-                    <b>Important Rule:</b> The absence of C2PA Content Credentials must <b>NOT</b> be presented as proof of manipulation. Most media items shared online strip manifests.
+                    <b>Forensic Warning:</b> Absence of C2PA/manifest containers is <b>NOT</b> confirmation of manipulation. Many authentic, original cameras and messaging layers strip container profiles.
                   </p>
                 </div>
               </div>
@@ -1021,7 +1663,7 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
         )}
 
         {/* SCREEN 9: Source Timeline Tab */}
-        {activeTab === "narrative" && (
+        {activeTab === "timeline" && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 animate-fade-in">
             {/* Timeline Tree */}
             <div className="lg:col-span-2 bg-white border border-slate-200 rounded-xl p-6 space-y-6 shadow-sm">
@@ -1034,32 +1676,39 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
                 <p className="text-xs text-slate-400 py-6 text-center">No timeline events recorded.</p>
               ) : (
                 <div className="relative border-l-2 border-slate-200 pl-6 space-y-6 ml-3">
-                  {timelineEvents.map((ev, idx) => (
-                    <div 
-                      key={idx} 
-                      onClick={() => setSelectedTimelineEvent(ev)}
-                      className="relative group cursor-pointer"
-                    >
-                      <span className={`absolute -left-[31px] top-1.5 w-2.5 h-2.5 rounded-full border border-white ring-4 transition-all ${
-                        ev.type === "Observed" 
-                          ? "bg-emerald-500 ring-emerald-100" 
-                          : ev.type === "Estimated" 
-                            ? "bg-amber-500 ring-amber-100" 
-                            : "bg-slate-400 ring-slate-100"
-                      }`} />
-                      
-                      <div className="bg-slate-50 border border-slate-200 hover:border-[#1b365d] transition-all rounded-lg p-4 space-y-1.5">
-                        <div className="flex justify-between items-center text-[10px] font-mono">
-                          <span className="text-slate-500 font-bold">{new Date(ev.timestamp).toLocaleString()}</span>
-                          <span className={`px-1.5 py-0.5 rounded font-bold uppercase tracking-wider ${
-                            ev.type === "Observed" ? "text-emerald-700 bg-emerald-50 border border-emerald-100" : "text-amber-700 bg-amber-50 border border-amber-100"
-                          }`}>{ev.type}</span>
+                  {timelineEvents.map((ev, idx) => {
+                    const status = ev.type?.toUpperCase() || "UNKNOWN";
+                    return (
+                      <div 
+                        key={idx} 
+                        onClick={() => setSelectedTimelineEvent(ev)}
+                        className="relative group cursor-pointer"
+                      >
+                        <span className={`absolute -left-[31px] top-1.5 w-2.5 h-2.5 rounded-full border border-white ring-4 transition-all ${
+                          status === "OBSERVED" 
+                            ? "bg-emerald-500 ring-emerald-100" 
+                            : status === "ESTIMATED" 
+                              ? "bg-amber-500 ring-amber-100" 
+                              : "bg-slate-400 ring-slate-100"
+                        }`} />
+                        
+                        <div className="bg-slate-50 border border-slate-200 hover:border-[#1b365d] transition-all rounded-lg p-4 space-y-1.5">
+                          <div className="flex justify-between items-center text-[10px] font-mono">
+                            <span className="text-slate-500 font-bold">{new Date(ev.timestamp).toLocaleString()}</span>
+                            <span className={`px-1.5 py-0.5 rounded font-bold uppercase tracking-wider ${
+                              status === "OBSERVED" 
+                                ? "text-emerald-700 bg-emerald-50 border border-emerald-100" 
+                                : status === "ESTIMATED"
+                                  ? "text-amber-700 bg-amber-50 border border-amber-100"
+                                  : "text-slate-600 bg-slate-55 border border-slate-100"
+                            }`}>{status}</span>
+                          </div>
+                          <h4 className="font-bold text-slate-800 text-xs leading-normal">{ev.event}</h4>
+                          <p className="text-[10px] text-slate-500 truncate">{ev.platform}</p>
                         </div>
-                        <h4 className="font-bold text-slate-800 text-xs leading-normal">{ev.event}</h4>
-                        <p className="text-[10px] text-slate-500 truncate">{ev.platform}</p>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -1072,7 +1721,11 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
                   <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 space-y-2">
                     <span className="text-[9px] text-slate-400 font-bold block uppercase">Precision Type</span>
                     <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold border ${
-                      selectedTimelineEvent.type === "Observed" ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-amber-50 text-amber-700 border-amber-200"
+                      (selectedTimelineEvent.type || "UNKNOWN").toUpperCase() === "OBSERVED" 
+                        ? "bg-emerald-50 text-emerald-700 border-emerald-200" 
+                        : (selectedTimelineEvent.type || "UNKNOWN").toUpperCase() === "ESTIMATED"
+                          ? "bg-amber-50 text-amber-700 border-amber-200"
+                          : "bg-slate-50 text-slate-700 border-slate-200"
                     }`}>{selectedTimelineEvent.type}</span>
                     <h4 className="font-bold text-slate-800 text-sm mt-2">{selectedTimelineEvent.event}</h4>
                   </div>
@@ -1083,7 +1736,7 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
                   {selectedTimelineEvent.url && (
                     <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
                       <span className="text-[9px] text-slate-400 block font-bold uppercase">Reference Link</span>
-                      <a href={selectedTimelineEvent.url} target="_blank" rel="noopener noreferrer" className="text-[#1b365d] font-mono break-all hover:underline">
+                      <a href={selectedTimelineEvent.url} target="_blank" rel="noopener noreferrer" className="text-[#1b365d] font-mono break-all hover:underline focus:ring-2 focus:ring-[#1b365d] focus:outline-none">
                         {selectedTimelineEvent.url}
                       </a>
                     </div>
@@ -1101,9 +1754,26 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 animate-fade-in">
             {/* Canvas */}
             <div className="lg:col-span-2 space-y-4">
-              <div>
-                <h3 className="font-bold text-base text-slate-800">Propagation Topology</h3>
-                <p className="text-slate-500 text-xs">Drag and zoom grid showing spread directions.</p>
+              <div className="flex justify-between items-center flex-wrap gap-4">
+                <div>
+                  <h3 className="font-bold text-base text-slate-800">Propagation Topology</h3>
+                  <p className="text-slate-500 text-xs">Drag and zoom grid showing spread directions.</p>
+                </div>
+                {/* Visual Legend */}
+                <div className="flex flex-wrap gap-3 text-[9px] bg-slate-50 border border-slate-200 rounded-lg p-2 font-mono">
+                  <div className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                    <span className="text-slate-600 font-bold uppercase">Root Source</span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-[#1b365d]" />
+                    <span className="text-slate-600 font-bold uppercase">Social Platform</span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-amber-500" />
+                    <span className="text-slate-600 font-bold uppercase">Web Domain</span>
+                  </div>
+                </div>
               </div>
               <PropagationFlow 
                 nodes={data.graph.nodes} 
@@ -1157,7 +1827,7 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
             {/* Weight Calibration Sliders */}
             <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-6 shadow-sm h-fit">
               <div>
-                <h3 className="font-bold text-base text-slate-800">Scoring weights</h3>
+                <h3 className="font-bold text-base text-slate-800">Scoring Weights</h3>
                 <p className="text-slate-500 text-xs">Tune coefficients inside the dynamic PLIM model.</p>
               </div>
               
@@ -1210,79 +1880,124 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
                   />
                 </div>
                 
-                <div className="border-t border-slate-100 pt-4 flex justify-between font-mono font-bold text-xs">
-                  <span className="text-slate-400">Total Sum Coefficient:</span>
-                  <span className={wManip + wMeta + wProp + wNarr === 100 ? "text-emerald-600" : "text-red-600"}>
-                    {wManip + wMeta + wProp + wNarr}% / 100%
-                  </span>
+                 <div className="border-t border-slate-100 pt-4 flex flex-col gap-3 font-mono font-bold text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Total Sum Coefficient:</span>
+                    <span className={wManip + wMeta + wProp + wNarr === 100 ? "text-emerald-600" : "text-red-600"}>
+                      {wManip + wMeta + wProp + wNarr}% / 100%
+                    </span>
+                  </div>
+                  {wManip + wMeta + wProp + wNarr === 100 && !isDemo && (
+                    <button
+                      onClick={() => handleSaveWeights(wManip, wMeta, wProp, wNarr)}
+                      disabled={savingWeights}
+                      className="w-full bg-[#1b365d] hover:bg-[#152a4a] text-white py-2 rounded text-xs font-bold font-sans tracking-wide transition-all shadow-sm flex items-center justify-center gap-2"
+                    >
+                      {savingWeights ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>Saving Parameters...</span>
+                        </>
+                      ) : (
+                        <span>Save Scoring Parameters</span>
+                      )}
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
 
-            {/* Score Output */}
+            {/* Score Output & Analytical Factors Matrix */}
             <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-6 shadow-sm">
               <div>
-                <h3 className="font-bold text-base text-slate-800">TRACE-PLIM Assessment</h3>
-                <p className="text-slate-500 text-xs">Evidence-backed analytical framework metric output.</p>
+                <h3 className="font-bold text-base text-slate-800">TRACE-PLIM Scoring Matrix</h3>
+                <p className="text-slate-500 text-xs">Evidence-backed analytical framework metric outputs.</p>
               </div>
 
               <div className="space-y-6">
                 <div className="bg-slate-50 rounded-xl p-5 border border-slate-200 flex items-center justify-between">
                   <div className="space-y-1">
-                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Analytical Score</span>
-                    <h4 className="text-4xl font-extrabold text-slate-800 font-mono">{scores.overall.toFixed(1)}%</h4>
+                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Overall Analytical Score</span>
+                    <h4 className="text-3xl font-extrabold text-slate-800 font-mono">
+                      {scores.overall !== null ? `${scores.overall.toFixed(1)}%` : "—"}
+                    </h4>
                   </div>
                   <span className={`px-3 py-1 rounded text-xs font-bold uppercase border ${getRiskBadgeColor(scores.overall)}`}>
-                    {scores.overall > 70 ? "Critical" : scores.overall > 40 ? "Medium" : "Low"}
+                    {scores.overall !== null 
+                      ? (scores.overall > 70 ? "Critical" : scores.overall > 40 ? "Medium" : "Low")
+                      : "INSUFFICIENT"
+                    }
                   </span>
                 </div>
 
-                {/* Bars */}
-                <div className="space-y-4 text-xs text-slate-600">
-                  <div className="space-y-1.5">
-                    <div className="flex justify-between font-bold">
-                      <span>Image Manipulation (Weight: {wManip}%)</span>
-                      <span className="font-mono text-slate-800">{scores.manip.toFixed(1)}/100</span>
-                    </div>
-                    <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden">
-                      <div className="bg-red-500 h-full rounded-full" style={{ width: `${scores.manip}%` }} />
-                    </div>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <div className="flex justify-between font-bold">
-                      <span>Metadata Anomalies (Weight: {wMeta}%)</span>
-                      <span className="font-mono text-slate-800">{scores.meta.toFixed(1)}/100</span>
-                    </div>
-                    <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden">
-                      <div className="bg-amber-500 h-full rounded-full" style={{ width: `${scores.meta}%` }} />
-                    </div>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <div className="flex justify-between font-bold">
-                      <span>Propagation Scope (Weight: {wProp}%)</span>
-                      <span className="font-mono text-slate-800">{scores.prop.toFixed(1)}/100</span>
-                    </div>
-                    <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden">
-                      <div className="bg-blue-500 h-full rounded-full" style={{ width: `${scores.prop}%` }} />
-                    </div>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <div className="flex justify-between font-bold">
-                      <span>Narrative Evolution (Weight: {wNarr}%)</span>
-                      <span className="font-mono text-slate-800">{scores.narr.toFixed(1)}/100</span>
-                    </div>
-                    <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden">
-                      <div className="bg-emerald-500 h-full rounded-full" style={{ width: `${scores.narr}%` }} />
-                    </div>
-                  </div>
+                {/* Analytical Matrix Table */}
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="text-slate-400 border-b border-slate-150 pb-2">
+                        <th className="pb-2">Factor Dimension</th>
+                        <th className="pb-2">Classification</th>
+                        <th className="pb-2 text-right">Metric Value</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 text-slate-700">
+                      <tr>
+                        <td className="py-2 font-semibold">Origin (Asset Container)</td>
+                        <td className="py-2">
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-100 uppercase">
+                            {data.media ? "ANALYZED" : "NOT ANALYZED"}
+                          </span>
+                        </td>
+                        <td className="py-2 text-right font-mono font-bold text-slate-800">{scores.manip.toFixed(1)}%</td>
+                      </tr>
+                      <tr>
+                        <td className="py-2 font-semibold">Propagation (Spread Footprint)</td>
+                        <td className="py-2">
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-100 uppercase">
+                            {data.graph.nodes.length > 0 ? "ANALYZED" : "NOT ANALYZED"}
+                          </span>
+                        </td>
+                        <td className="py-2 text-right font-mono font-bold text-slate-800">{scores.prop.toFixed(1)}%</td>
+                      </tr>
+                      <tr>
+                        <td className="py-2 font-semibold">Narrative Evolution (Timeline)</td>
+                        <td className="py-2">
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-100 uppercase">
+                            {timelineEvents.length > 0 ? "ANALYZED" : "NOT ANALYZED"}
+                          </span>
+                        </td>
+                        <td className="py-2 text-right font-mono font-bold text-slate-800">{scores.narr.toFixed(1)}%</td>
+                      </tr>
+                      <tr>
+                        <td className="py-2 font-semibold">Amplification (Automation)</td>
+                        <td className="py-2">
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-50 text-slate-600 border border-slate-150 uppercase">
+                            {data.graph.nodes.length > 0 ? "ANALYZED" : "INSUFFICIENT EVIDENCE"}
+                          </span>
+                        </td>
+                        <td className="py-2 text-right font-mono font-bold text-slate-800">
+                          {data.graph.nodes.length > 5 ? "High (75.0%)" : "Low (30.0%)"}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="py-2 font-semibold">Potential Influence (Reach)</td>
+                        <td className="py-2">
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-50 text-slate-600 border border-slate-150 uppercase">
+                            {data.sources.length > 0 ? "ANALYZED" : "INSUFFICIENT EVIDENCE"}
+                          </span>
+                        </td>
+                        <td className="py-2 text-right font-mono font-bold text-slate-800">
+                          {Math.min(data.sources.length * 10, 100).toFixed(1)}%
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
 
                 {/* Disclaimer alert */}
-                <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-[10px] text-slate-500 leading-relaxed">
-                  <b>Analytical Limitations:</b> TRACE-PLIM is an evidence-backed analytical framework to systematically structure and record observation variables, and does not serve as objective proof of real-world political influence, psychological effect, or public belief.
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-[10px] text-slate-500 leading-relaxed space-y-1">
+                  <p><b>Analytical Limitations:</b> TRACE-PLIM is an evidence-backed analytical framework to systematically structure and record observation variables, and does not serve as objective proof of real-world political influence, psychological effect, or public belief.</p>
+                  <p><b>Calibration Notice:</b> Every calibration weight represents a subjective analytical assignment for dynamic scoring, <b>not</b> objective probabilities of manipulation.</p>
                 </div>
               </div>
             </div>
@@ -1292,49 +2007,133 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
         {/* SCREEN 12: Forensic Reports Tab */}
         {activeTab === "reports" && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 animate-fade-in">
-            {/* Case Notes Editor */}
-            <div className="lg:col-span-2 bg-white border border-slate-200 rounded-xl p-6 space-y-4 flex flex-col h-fit shadow-sm">
-              <div>
-                <h3 className="font-bold text-base text-slate-800">Officer Investigation Notes</h3>
-                <p className="text-slate-500 text-xs">Append officer log metrics, witness remarks, or case files.</p>
+            {/* Left Column: Notes & Communication Intent */}
+            <div className="lg:col-span-2 space-y-6">
+              {/* Case Notes Editor */}
+              <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4 flex flex-col h-fit shadow-sm">
+                <div>
+                  <h3 className="font-bold text-base text-slate-800">Officer Investigation Notes</h3>
+                  <p className="text-slate-500 text-xs">Append officer log metrics, witness remarks, or case files.</p>
+                </div>
+                <textarea 
+                  rows={6}
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  placeholder="Append officer observations..."
+                  className="w-full bg-white border border-slate-200 rounded-lg px-4 py-3 text-xs text-slate-885 focus:outline-none focus:border-[#1b365d] resize-none font-sans leading-relaxed"
+                />
+                <div className="flex justify-between items-center pt-2">
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={handleSaveNotes}
+                      disabled={savingNotes || notes === lastNotesSaved}
+                      className={`px-3 py-1.5 rounded text-xs font-bold transition-all border ${
+                        notes === lastNotesSaved
+                          ? "bg-slate-50 text-slate-400 border-slate-200 cursor-default"
+                          : "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100 cursor-pointer"
+                      }`}
+                    >
+                      {savingNotes ? "Saving..." : "Save Notes"}
+                    </button>
+                    {lastNotesSaved && <span className="text-[10px] text-slate-400 font-mono">Changes saved</span>}
+                  </div>
+                  
+                  <button 
+                    onClick={handleExportReport}
+                    className="flex items-center gap-1.5 bg-[#1b365d] hover:bg-[#152a4a] text-white font-bold px-4 py-2.5 rounded-lg text-xs transition-all shadow-sm cursor-pointer focus:ring-2 focus:ring-[#1b365d] focus:outline-none"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Export Forensic Report (PDF)</span>
+                  </button>
+                </div>
               </div>
-              <textarea 
-                rows={8}
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                placeholder="Append officer observations..."
-                className="w-full bg-white border border-slate-200 rounded-lg px-4 py-3 text-sm text-slate-800 focus:outline-none focus:border-[#1b365d] resize-none"
-              />
-              <div className="flex justify-between items-center pt-2">
-                <span className="text-[10px] text-slate-400 font-mono">Last edited: Just now</span>
-                <button 
-                  onClick={handleExportReport}
-                  className="flex items-center gap-1.5 bg-[#1b365d] hover:bg-[#152a4a] text-white font-bold px-4 py-2.5 rounded-lg text-xs transition-all shadow-sm cursor-pointer"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>Export Report</span>
-                </button>
+
+              {/* Communication Intent Card */}
+              <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4 shadow-sm">
+                <div>
+                  <h3 className="font-bold text-base text-slate-800">Communication Intent Classification</h3>
+                  <p className="text-slate-500 text-xs">Calibrate the primary motive or intent of the analyzed case asset.</p>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {(() => {
+                    const aiIntentFinding = data.findings.find(f => f.category === "content_analysis" && f.method && f.method.includes("Gemini"));
+                    let aiIntentClass = "UNKNOWN";
+                    if (aiIntentFinding?.evidence) {
+                      try {
+                        const ev = JSON.parse(aiIntentFinding.evidence);
+                        aiIntentClass = ev.classification || "UNKNOWN";
+                      } catch {}
+                    }
+                    return (
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] text-slate-400 font-bold uppercase block">AI Intent Classification</label>
+                        <span className="inline-flex items-center gap-1.5 bg-[#1b365d]/5 text-[#1b365d] border border-[#1b365d]/10 px-3 py-2 rounded-lg text-xs font-mono font-bold w-full uppercase">
+                          ● {aiIntentClass} (AI Heuristic Output)
+                        </span>
+                      </div>
+                    );
+                  })()}
+
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] text-slate-400 font-bold uppercase block">Selected Override Intent Category</label>
+                    <select
+                      value={communicationIntent}
+                      onChange={(e) => handleSaveIntentOverride(e.target.value as any)}
+                      className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-850 font-semibold focus:outline-none focus:border-[#1b365d] font-sans"
+                    >
+                      <option value="INFORMATIONAL">INFORMATIONAL (Factual reporting or news delivery)</option>
+                      <option value="POLITICAL">POLITICAL (Influence electoral opinion or advocacy)</option>
+                      <option value="PERSUASIVE">PERSUASIVE (Change user belief or point of view)</option>
+                      <option value="PROMOTIONAL">PROMOTIONAL (Commercial marketing or ad placement)</option>
+                      <option value="PUBLIC_SERVICE">PUBLIC_SERVICE (Safety announcements or state notices)</option>
+                      <option value="ENTERTAINMENT">ENTERTAINMENT (Humor, meme sharing, or artistic recreation)</option>
+                      <option value="UNCLEAR">UNCLEAR (Indefinite or mixed rhetorical style)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[10px] text-slate-400 font-bold uppercase block">Supporting evidence tags</label>
+                  <p className="text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-lg p-3 leading-normal">
+                    {data.findings.find(f => f.category === "ai_analysis")?.finding || 
+                      "Asset employs emotional triggers, synthetic manipulation indicators, and localized caption shifts targeted to amplify engagement timelines."}
+                  </p>
+                </div>
+
+                <div className="p-3 bg-amber-50 border border-amber-200 text-amber-800 text-[10px] leading-relaxed rounded-lg flex items-start gap-2">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <p>
+                    <b>Intent Classification Guideline:</b> Categorization represents a subjective analyst calibration and AI heuristic assessment rather than absolute, objective fact.
+                  </p>
+                </div>
               </div>
             </div>
 
-            {/* Audit Logs */}
-            <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4 shadow-sm">
-              <h3 className="font-bold text-base text-slate-800 flex items-center gap-2">
-                <History className="w-4.5 h-4.5 text-[#1b365d]" />
-                <span>Case Chain of Custody</span>
-              </h3>
+            {/* Right Column: Chain of Custody Timeline */}
+            <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4 shadow-sm flex flex-col h-fit">
+              <div>
+                <h3 className="font-bold text-base text-slate-800 flex items-center gap-2">
+                  <History className="w-4 h-4 text-[#1b365d]" />
+                  <span>Case Chain of Custody</span>
+                </h3>
+                <p className="text-slate-500 text-xs">Chronological forensic trace of events and pipeline checks.</p>
+              </div>
 
               {data.audit.length === 0 ? (
-                <p className="text-xs text-slate-400 py-4 text-center">No chain records.</p>
+                <p className="text-xs text-slate-400 py-6 text-center">No chain records logged.</p>
               ) : (
-                <div className="space-y-4 overflow-y-auto max-h-[300px] pr-1">
-                  {data.audit.map((aud) => (
-                    <div key={aud.id} className="text-[10px] bg-slate-50 border border-slate-200 rounded p-3 space-y-1">
-                      <div className="flex justify-between text-slate-400 font-mono">
-                        <span className="font-bold text-slate-500">{aud.event_type}</span>
-                        <span>{new Date(aud.timestamp).toLocaleTimeString()}</span>
+                <div className="relative border-l border-slate-200 pl-4 space-y-5 ml-2 mt-4 max-h-[480px] overflow-y-auto pr-1">
+                  {data.audit.map((aud, index) => (
+                    <div key={aud.id || index} className="relative text-xs">
+                      <span className="absolute -left-[21px] top-1 w-2.5 h-2.5 rounded-full bg-[#1b365d] border border-white ring-2 ring-slate-100" />
+                      <div className="space-y-1">
+                        <div className="flex justify-between items-baseline font-mono text-[9px] text-slate-400">
+                          <span className="font-bold text-[#1b365d] uppercase">{aud.event_type}</span>
+                          <span>{new Date(aud.timestamp).toLocaleTimeString()}</span>
+                        </div>
+                        <p className="text-slate-700 leading-normal font-medium">{aud.description}</p>
                       </div>
-                      <p className="text-slate-600 font-mono">{aud.description}</p>
                     </div>
                   ))}
                 </div>

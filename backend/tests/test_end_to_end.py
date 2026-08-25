@@ -77,7 +77,7 @@ def test_full_pipeline_flow():
     assert resp_c2pa.status_code == 200
     c2pa_data = resp_c2pa.json()
     assert "status" in c2pa_data
-    assert c2pa_data["status"] in ["NOT_PRESENT", "VERIFIED", "PRESENT_UNVERIFIED", "INVALID"]
+    assert c2pa_data["status"] in ["NOT_PRESENT", "VERIFIED", "PRESENT_UNVERIFIED", "INVALID", "CONTAINER_DETECTED"]
     
     # 5. Check timeline & source candidates
     resp_sources = client.get(f"/api/investigations/{inv_id}/sources")

@@ -1,6 +1,7 @@
 import os
 import json
 from google import genai
+from google.genai import types
 from backend.app.config import settings
 
 class AIAnalysisService:
@@ -14,9 +15,66 @@ class AIAnalysisService:
             except Exception as e:
                 print(f"[AI] Failed to initialize Gemini client: {e}")
 
+    def _generate_content_with_fallback(self, contents) -> str:
+        """
+        Executes generate_content with model fallback and exponential backoff.
+        Fallback sequence: gemini-2.5-flash -> gemini-2.0-flash -> gemini-1.5-flash.
+        Backoff sequence: attempt 1 -> wait -> attempt 2 -> wait -> attempt 3.
+        Disables automatic function calling to suppress the AFC warning.
+        """
+        import time
+        import random
+        
+        if not self.client:
+            raise Exception("Gemini client not initialized")
+            
+        models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+        max_retries = 3
+        
+        for model in models_to_try:
+            print(f"[AI] Attempting generate_content with model: '{model}'")
+            backoff = 1.0
+            
+            for attempt in range(max_retries):
+                try:
+                    # Disable Automatic Function Calling to suppress the warning
+                    config = types.GenerateContentConfig(
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+                    )
+                    
+                    response = self.client.models.generate_content(
+                        model=model,
+                        contents=contents,
+                        config=config
+                    )
+                    if response and response.text:
+                        print(f"[AI] Successfully generated content using model: '{model}' on attempt {attempt + 1}")
+                        return response.text
+                    
+                except Exception as e:
+                    err_msg = str(e)
+                    is_503 = "503" in err_msg or "UNAVAILABLE" in err_msg or "high demand" in err_msg
+                    
+                    print(f"[AI] Model '{model}' attempt {attempt + 1} failed: {e}")
+                    
+                    # If it's a structural or authorization issue (non-503), do not retry or fall back
+                    if not is_503:
+                        raise e
+                    
+                    # Exponential backoff with jitter
+                    if attempt < max_retries - 1:
+                        sleep_time = backoff + random.uniform(0.1, 0.5)
+                        print(f"[AI] 503 Service Unavailable. Retrying in {sleep_time:.2f} seconds...")
+                        time.sleep(sleep_time)
+                        backoff *= 2.0
+            
+            print(f"[AI] Model '{model}' exhausted all {max_retries} attempts.")
+        
+        raise Exception("All configured Gemini models returned 503 Service Unavailable.")
+
     def analyze_media(self, media_path: str, mime_type: str, ocr_text: str = None, metadata: dict = None, sampled_frames: list = None) -> dict:
         """
-        Queries Gemini 2.5 Flash for multimodal forensics.
+        Queries Gemini with fallback models for multimodal forensics.
         For images: scans lighting, anatomical errors, composites, EXIF inconsistencies.
         For videos: scans sequence of sampled frames, temporal jumps, audio-visual alignment.
         """
@@ -27,8 +85,7 @@ class AIAnalysisService:
                 
                 # 1. Load media assets into contents list
                 if is_video and sampled_frames:
-                    # Load the 5 sampled video frames in sequence
-                    for idx, frame_path in enumerate(sampled_frames):
+                    for frame_path in sampled_frames:
                         if os.path.exists(frame_path):
                             with open(frame_path, "rb") as f_img:
                                 f_bytes = f_img.read()
@@ -39,11 +96,9 @@ class AIAnalysisService:
                                 }
                             })
                     if not contents:
-                        # Fallback to loading the original video file if no frames are present
                         with open(media_path, "rb") as f_orig:
                             contents.append({"inline_data": {"mime_type": mime_type, "data": f_orig.read()}})
                 else:
-                    # Single image or audio file
                     with open(media_path, "rb") as f_orig:
                         contents.append({"inline_data": {"mime_type": mime_type, "data": f_orig.read()}})
 
@@ -98,29 +153,44 @@ class AIAnalysisService:
                   ]
                 }
                 """
-                
-                # Append the prompt to contents
                 contents.append(prompt)
                 
-                response = self.client.models.generate_content(
-                    model="gemini-2.5-flash",
-                    contents=contents
-                )
+                # Use fallback generator instead of direct models call
+                text = self._generate_content_with_fallback(contents)
                 
-                # Parse JSON block from response
-                text = response.text.strip()
-                if "```json" in text:
-                    text = text.split("```json")[1].split("```")[0].strip()
-                elif "```" in text:
-                    text = text.split("```")[1].split("```")[0].strip()
+                text_clean = text.strip()
+                if "```json" in text_clean:
+                    text_clean = text_clean.split("```json")[1].split("```")[0].strip()
+                elif "```" in text_clean:
+                    text_clean = text_clean.split("```")[1].split("```")[0].strip()
                 
-                return json.loads(text)
+                res_json = json.loads(text_clean)
+                res_json["analysis_completed"] = True
+                res_json["findings_count"] = len(res_json.get("indicators", []))
+                return res_json
                 
             except Exception as e:
                 print(f"[AI] Gemini analysis failed: {e}")
+                return {
+                    "ai_status": "UNAVAILABLE",
+                    "reason": f"Gemini provider temporarily unavailable: {e}",
+                    "indicators": [],
+                    "ai_generation_likelihood": None,
+                    "manipulation_likelihood": None,
+                    "confidence": None,
+                    "summary": "AI-assisted analysis temporarily unavailable."
+                }
                 
-        # Graceful Local Fallback
-        return self._run_rule_based_ai_assessment(ocr_text, metadata)
+        # Graceful Local Fallback indicating Unavailable
+        return {
+            "ai_status": "UNAVAILABLE",
+            "reason": "Gemini provider temporarily unavailable: Client not initialized" if self.client else "Gemini API key not configured",
+            "indicators": [],
+            "ai_generation_likelihood": None,
+            "manipulation_likelihood": None,
+            "confidence": None,
+            "summary": "AI-assisted analysis temporarily unavailable."
+        }
 
     def _run_rule_based_ai_assessment(self, ocr_text: str = None, metadata: dict = None) -> dict:
         """
@@ -198,7 +268,7 @@ class AIAnalysisService:
         
     def generate_narrative_evolution(self, versions: list) -> dict:
         """
-        Uses Gemini to compare how narratives shifted. Falls back to string comparisons.
+        Uses Gemini to compare how narratives shifted.
         """
         if self.client and len(versions) >= 2:
             try:
@@ -223,21 +293,25 @@ class AIAnalysisService:
                   ]
                 }}
                 """
-                response = self.client.models.generate_content(
-                    model="gemini-2.5-flash",
-                    contents=prompt
-                )
-                text = response.text.strip()
-                if "```json" in text:
-                    text = text.split("```json")[1].split("```")[0].strip()
-                elif "```" in text:
-                    text = text.split("```")[1].split("```")[0].strip()
-                return json.loads(text)
+                text = self._generate_content_with_fallback(prompt)
+                text_clean = text.strip()
+                if "```json" in text_clean:
+                    text_clean = text_clean.split("```json")[1].split("```")[0].strip()
+                elif "```" in text_clean:
+                    text_clean = text_clean.split("```")[1].split("```")[0].strip()
+                return json.loads(text_clean)
             except Exception as e:
                 print(f"[AI] Narrative reasoning failed: {e}")
                 
-        # Heuristic Narrative Shift Fallback
-        return self._run_rule_based_narrative(versions)
+        # Graceful Local Fallback indicating Unavailable
+        return {
+            "ai_status": "UNAVAILABLE",
+            "reason": "Gemini provider temporarily unavailable" if self.client else "Gemini API key not configured",
+            "evolution_pattern": "UNAVAILABLE",
+            "summary": "AI-assisted narrative analysis temporarily unavailable.",
+            "intensity_score": None,
+            "shifts": []
+        }
         
     def _run_rule_based_narrative(self, versions: list) -> dict:
         if len(versions) < 2:
@@ -282,6 +356,116 @@ class AIAnalysisService:
             "summary": "Rule-based assessment shows structural variations across captions.",
             "intensity_score": 0.35,
             "shifts": shifts
+        }
+
+    def analyze_content_influence(self, media_path: str, mime_type: str, ocr_text: str = None, metadata: dict = None, sampled_frames: list = None) -> dict:
+        """
+        Queries Gemini to analyze content intent, entity mentions, slogans, and hashtags.
+        Distinguishes informational vs promotional/persuasive intent.
+        """
+        if self.client:
+            try:
+                contents = []
+                is_video = mime_type.startswith("video/")
+                
+                # Load frame images if present for visual/contextual understanding
+                if is_video and sampled_frames:
+                    for frame_path in sampled_frames[:3]: # take up to 3 frames
+                        if os.path.exists(frame_path):
+                            with open(frame_path, "rb") as f_img:
+                                contents.append({
+                                    "inline_data": {
+                                        "mime_type": "image/jpeg",
+                                        "data": f_img.read()
+                                    }
+                                })
+                elif os.path.exists(media_path) and not is_video:
+                    with open(media_path, "rb") as f_orig:
+                        contents.append({"inline_data": {"mime_type": mime_type, "data": f_orig.read()}})
+                
+                prompt = f"""
+                You are a forensic content analyst. Analyze the following content items (and visual elements if present) to classify its communication intent.
+                OCR Text: {ocr_text if ocr_text else "None"}
+                Metadata: {json.dumps(metadata) if metadata else "None"}
+
+                Perform a structured analysis:
+                1. Extract details:
+                   - Visible text
+                   - Spoken claims (if present or translatable from text)
+                   - Entities: people, organizations, locations, dates, products, events
+                   - Stylistics: slogans, hashtags, distinctive phrases
+                2. Classify intent:
+                   - Select EXACTLY one primary classification from: PROMOTIONAL, INFORMATIONAL, PERSUASIVE, POLITICAL, PUBLIC_SERVICE, ENTERTAINMENT, UNCLEAR.
+                   - Provide a confidence score (low, medium, high).
+                   - Document supporting evidence.
+                   - Document analytical limitations (e.g. lack of audio transcript, missing original context).
+
+                CRITICAL CRITERIA:
+                - Do NOT classify content as POLITICAL or PERSUASIVE based on tone alone.
+                - Only classify as POLITICAL if there is explicit political messaging, campaign slogans, or verified official entities.
+                - Do not speculate or make unsupported claims.
+
+                Respond strictly in JSON format matching this schema:
+                {{
+                  "classification": "PROMOTIONAL" | "INFORMATIONAL" | "PERSUASIVE" | "POLITICAL" | "PUBLIC_SERVICE" | "ENTERTAINMENT" | "UNCLEAR",
+                  "confidence": "low" | "medium" | "high",
+                  "supporting_evidence": "Technical evidence supporting the intent classification.",
+                  "limitations": "Forensic constraints and limitations.",
+                  "entities": {{
+                     "people": [string],
+                     "organizations": [string],
+                     "locations": [string],
+                     "dates": [string],
+                     "products": [string],
+                     "events": [string]
+                  }},
+                  "text_elements": {{
+                     "visible_text": "extracted visible text",
+                     "spoken_claims": "extracted claims",
+                     "slogans": [string],
+                     "hashtags": [string],
+                     "distinctive_phrases": [string]
+                  }}
+                }}
+                """
+                contents.append(prompt)
+                
+                text = self._generate_content_with_fallback(contents)
+                
+                text_clean = text.strip()
+                if "```json" in text_clean:
+                    text_clean = text_clean.split("```json")[1].split("```")[0].strip()
+                elif "```" in text_clean:
+                    text_clean = text_clean.split("```")[1].split("```")[0].strip()
+                
+                res_dict = json.loads(text_clean)
+                return res_dict
+            except Exception as e:
+                print(f"[AI] Gemini content analysis failed: {e}")
+                
+        # Graceful Local Fallback indicating Unavailable
+        return {
+            "ai_status": "UNAVAILABLE",
+            "reason": "Gemini provider temporarily unavailable" if self.client else "Gemini API key not configured",
+            "classification": "UNCLEAR",
+            "confidence": "low",
+            "supporting_evidence": "AI content analysis temporarily unavailable due to service interruption.",
+            "limitations": "No connection to multimodal AI services.",
+            "entities": {
+                "people": [],
+                "organizations": [],
+                "locations": [],
+                "dates": [],
+                "products": [],
+                "events": []
+            },
+            "text_elements": {
+                "visible_text": ocr_text or "",
+                "spoken_claims": "",
+                "slogans": [],
+                "hashtags": [],
+                "distinctive_phrases": []
+            }
         }
 
 ai_analysis_service = AIAnalysisService()

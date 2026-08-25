@@ -42,20 +42,10 @@ class C2PAService:
                 elif b"Leica" in content:
                     issuer = "Leica Content Credentials"
                     
-                result["status"] = "PRESENT_UNVERIFIED"
+                result["status"] = "CONTAINER_DETECTED"
                 result["issuer"] = issuer
                 result["claim"] = f"C2PA manifest found in container headers. Issuer: {issuer}."
-                result["verification_result"] = "Manifest signatures are present but unverified (full CA trust anchor validation required)."
-                
-                # Check for test/development keys
-                if b"test" in content.lower() or b"dev" in content.lower() or b"self-signed" in content.lower():
-                    result["status"] = "INVALID"
-                    result["verification_result"] = "C2PA signature is INVALID or self-signed (untrusted certificate chain)."
-                else:
-                    # In a real system, we would run cryptographic validation.
-                    # We mark as VERIFIED if the certificate chain looks correct
-                    result["status"] = "VERIFIED"
-                    result["verification_result"] = f"Content credentials successfully VERIFIED against CA root store ({issuer})."
+                result["verification_result"] = f"C2PA container signature '{issuer}' detected via header parsing, but full cryptographic chain-of-trust validation is unavailable."
             else:
                 result["status"] = "NOT_PRESENT"
                 result["verification_result"] = "No C2PA/JUMBF signature detected in media headers."

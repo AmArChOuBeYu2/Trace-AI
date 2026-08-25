@@ -141,7 +141,8 @@ class TavilyProvider(SourceSearchProvider):
                 "crawl_timestamp": datetime.utcnow().isoformat() + "Z",
                 "relevance_rank": idx + 1,
                 "classification_rationale": f"Matched query terms inside Tavily search index. Score: {similarity}",
-                "query": query
+                "query": query,
+                "timestamp_state": "Observed" if pub_date else "Estimated"
             }
 
             results.append({

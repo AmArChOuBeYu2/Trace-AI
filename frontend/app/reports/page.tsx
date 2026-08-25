@@ -38,7 +38,7 @@ export default function ReportsArchive() {
           title: inv.title,
           risk_level: inv.risk_level,
           created_at: inv.created_at,
-          report_path: `/investigations/${inv.id}#report`
+          report_path: `/investigations/${inv.id}?tab=reports`
         }));
         setReports(formatted);
         setLoading(false);

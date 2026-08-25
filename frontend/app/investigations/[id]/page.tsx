@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, Suspense } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { Loader2, ArrowLeft } from "lucide-react";
 import Link from "next/link";
@@ -126,7 +126,16 @@ export default function InvestigationDetailPage() {
           <span>Operations Center</span>
         </Link>
       </div>
-      <InvestigationWorkspace data={data} onManualSearch={handleManualSearch} onRefresh={fetchCaseDetails} />
+      <Suspense fallback={
+        <div className="flex-1 flex flex-col items-center justify-center py-24 gap-4">
+          <Loader2 className="w-8 h-8 text-[#1b365d] animate-spin" />
+          <span className="text-slate-400 text-sm font-semibold tracking-wide">
+            Assembling Case Evidence Trails...
+          </span>
+        </div>
+      }>
+        <InvestigationWorkspace data={data} onManualSearch={handleManualSearch} onRefresh={fetchCaseDetails} />
+      </Suspense>
     </div>
   );
 }

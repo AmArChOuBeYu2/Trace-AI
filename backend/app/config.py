@@ -35,6 +35,9 @@ class Settings:
     # Source Tracing / Search
     SOURCE_SEARCH_API_KEY: str = os.getenv("SOURCE_SEARCH_API_KEY", "")
     
+    # CORS Configuration
+    ALLOWED_ORIGINS: str = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
+    
     # Local Processing Directories
     UPLOAD_DIR: str = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
     SQLITE_DB_PATH: str = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "trace_ai.db")

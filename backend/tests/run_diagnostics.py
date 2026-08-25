@@ -47,11 +47,11 @@ def run_diagnostics_check() -> bool:
     print("\n--- Testing Media Processor Binaries ---")
     ffmpeg_bin = shutil.which("ffmpeg")
     if ffmpeg_bin is None:
-        ffmpeg_bin = r"C:\ffmpeg\bin\ffmpeg.exe"
+        ffmpeg_bin = r"C:\ffmpeg\bin\ffmpeg.exe" if os.name == "nt" else "ffmpeg"
         
     ffprobe_bin = shutil.which("ffprobe")
     if ffprobe_bin is None:
-        ffprobe_bin = r"C:\ffmpeg\bin\ffprobe.exe"
+        ffprobe_bin = r"C:\ffmpeg\bin\ffprobe.exe" if os.name == "nt" else "ffprobe"
 
     try:
         res = subprocess.run([ffmpeg_bin, "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -109,20 +109,38 @@ def run_diagnostics_check() -> bool:
     print("\n--- Testing Gemini AI Connectivity ---")
     try:
         from google import genai
-        gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-        res = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents="State 'OK' if online."
-        )
-        if res.text:
-            print(f"  - Gemini AI        : CONNECTED (Response: '{res.text.strip()}')")
-            scorecard["Gemini"] = "CONNECTED"
+        from google.genai import types
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if not gemini_key:
+            print("  - Gemini AI        : FAILED_CONFIGURATION (Missing API Key)")
+            scorecard["Gemini"] = "FAILED_CONFIGURATION"
         else:
-            print("  - Gemini AI        : FAILED (Empty response)")
-            scorecard["Gemini"] = "FAILED"
+            gemini_client = genai.Client(api_key=gemini_key)
+            config = types.GenerateContentConfig(
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+            )
+            res = gemini_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents="State 'OK' if online.",
+                config=config
+            )
+            if res.text:
+                print(f"  - Gemini AI        : CONNECTED (Response: '{res.text.strip()}')")
+                scorecard["Gemini"] = "CONNECTED"
+            else:
+                print("  - Gemini AI        : FAILED (Empty response)")
+                scorecard["Gemini"] = "FAILED"
     except Exception as e:
-        print(f"  - Gemini AI        : FAILED ({e})")
-        scorecard["Gemini"] = "FAILED"
+        err_msg = str(e)
+        if "503" in err_msg or "UNAVAILABLE" in err_msg or "high demand" in err_msg:
+            print(f"  - Gemini AI        : TEMPORARILY_UNAVAILABLE ({err_msg})")
+            scorecard["Gemini"] = "TEMPORARILY_UNAVAILABLE"
+        elif "API key not valid" in err_msg or "400" in err_msg or "403" in err_msg or "INVALID_ARGUMENT" in err_msg:
+            print(f"  - Gemini AI        : FAILED_AUTH (Invalid API Key)")
+            scorecard["Gemini"] = "FAILED_AUTH"
+        else:
+            print(f"  - Gemini AI        : FAILED ({e})")
+            scorecard["Gemini"] = "FAILED"
 
     # 4c. LANGSEARCH
     print("\n--- Testing LangSearch Web Search Connectivity ---")
@@ -201,7 +219,9 @@ def run_diagnostics_check() -> bool:
     failed_required = []
     for service, status in scorecard.items():
         print(f"  - {service:<20}: {status}")
-        if status == "FAILED" and service != "Hugging Face":
+        # Critically require local media binaries (FFmpeg, ffprobe) and Supabase database config.
+        # Allow APIs (Gemini, LangSearch, Tavily, Hugging Face) to be temporarily unavailable or unauth without halting startup.
+        if (status == "FAILED" or status.startswith("FAILED_")) and service not in ["Hugging Face", "LangSearch", "Tavily", "Gemini"]:
             failed_required.append(service)
 
     print("="*70)
@@ -211,7 +231,7 @@ def run_diagnostics_check() -> bool:
         print("="*70 + "\n")
         raise RuntimeError(f"Diagnostics failed for required services: {failed_required}")
         
-    print("\n[SUCCESS] All required local binaries and API connections are successfully verified!")
+    print("\n[SUCCESS] Critical local binaries and database connection verified! Startup proceeding.")
     print("="*70 + "\n")
     return True
 

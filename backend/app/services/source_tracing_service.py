@@ -8,11 +8,14 @@ from backend.app.services.source_tracing.tavily_provider import tavily_provider
 
 class SourceTracingService:
     @staticmethod
-    async def search_sources(keywords: str, investigation_id: str) -> list:
+    async def search_sources(queries: list, investigation_id: str) -> list:
         """
-        Queries LangSearch and Tavily search providers in parallel, merges/deduplicates
-        results by URL, ranks them, and writes candidate mappings to the database.
+        Queries LangSearch and Tavily search providers in parallel for each query,
+        merges/deduplicates results by URL, and formats candidates with rich metadata.
         """
+        if isinstance(queries, str):
+            queries = [queries]
+
         langsearch_active = bool(settings.LANGSEARCH_API_KEY)
         tavily_active = bool(settings.SOURCE_SEARCH_API_KEY)
 
@@ -26,85 +29,89 @@ class SourceTracingService:
             )
             return []
 
-        print(f"[SEARCH] Launching multi-provider search for terms: '{keywords}'")
-        
-        # Build tasks list dynamically
-        tasks = []
-        if langsearch_active:
-            tasks.append(langsearch_provider.search(query=keywords, count=10))
-        if tavily_active:
-            tasks.append(tavily_provider.search(query=keywords, count=10))
-
-        # Query active providers concurrently
-        search_responses = await asyncio.gather(*tasks, return_exceptions=True)
-        
         raw_candidates = []
-        for res in search_responses:
-            if isinstance(res, list):
-                raw_candidates.extend(res)
-            elif isinstance(res, Exception):
-                print(f"[SEARCH] A search provider query failed with exception: {res}")
+
+        # Execute searches for each generated query
+        for q in queries:
+            print(f"[SEARCH] Launching multi-provider search for query: '{q}'")
+            tasks = []
+            if langsearch_active:
+                tasks.append(langsearch_provider.search(query=q, count=5))
+            if tavily_active:
+                tasks.append(tavily_provider.search(query=q, count=5))
+
+            if tasks:
+                search_responses = await asyncio.gather(*tasks, return_exceptions=True)
+                for res in search_responses:
+                    if isinstance(res, list):
+                        for cand in res:
+                            cand["query"] = q
+                        raw_candidates.extend(res)
+                    elif isinstance(res, Exception):
+                        print(f"[SEARCH] Search provider query failed for '{q}': {res}")
 
         # Deduplicate results by URL
-        # Normalizing URL (strip trailing slashes, lowercase domains)
         deduped = {}
         for cand in raw_candidates:
             url = cand.get("url", "").strip()
             if not url:
                 continue
-                
+
             norm_url = url.lower().rstrip("/")
-            
+
             if norm_url in deduped:
-                # Merge logic
                 existing = deduped[norm_url]
+                if cand.get("query") and cand.get("query") not in existing.get("queries", []):
+                    existing["queries"].append(cand["query"])
                 
-                # Append provider info if not already there
-                existing_methods = [m.strip() for m in existing["discovery_method"].split(",")]
-                current_method = cand["discovery_method"]
-                if current_method not in existing_methods:
-                    existing["discovery_method"] = f"{existing['discovery_method']}, {current_method}"
-                
+                # Append provider to existing providers list
+                provider = cand.get("discovery_method") or "web_search"
+                if provider not in existing.get("providers", []):
+                    existing["providers"].append(provider)
+
                 # Keep highest similarity score
-                if cand["similarity_score"] > existing["similarity_score"]:
+                if cand.get("similarity_score", 0.0) > existing.get("similarity_score", 0.0):
                     existing["similarity_score"] = cand["similarity_score"]
                     existing["title"] = cand["title"]
                     existing["confidence"] = cand["confidence"]
-                    
-                # Combine evidence metadata
-                existing_ev = existing["evidence"]
-                current_ev = cand["evidence"]
-                merged_evidence = {
-                    "langsearch_metadata": existing_ev if "LangSearch" in existing["discovery_method"] else current_ev,
-                    "tavily_metadata": current_ev if "Tavily" in existing["discovery_method"] else existing_ev,
-                    "merged_at": datetime.utcnow().isoformat() + "Z",
-                    "snippets": [
-                        existing_ev.get("snippet"),
-                        current_ev.get("snippet")
-                    ]
-                }
-                existing["evidence"] = merged_evidence
+                    if cand.get("query"):
+                        existing["query"] = cand["query"]
             else:
-                # Add new
+                cand["queries"] = [cand.get("query")] if cand.get("query") else []
+                cand["providers"] = [cand.get("discovery_method")] if cand.get("discovery_method") else ["web_search"]
                 deduped[norm_url] = cand
 
-        # Format candidates list
         final_candidates = list(deduped.values())
-        
-        # Sort by similarity score descending
-        final_candidates.sort(key=lambda x: x["similarity_score"], reverse=True)
+        final_candidates.sort(key=lambda x: x.get("similarity_score", 0.0), reverse=True)
 
+        # Audit log event with results count
         db_manager.create_audit_event(
             investigation_id=investigation_id,
             event_type="SOURCE_SEARCH_COMPLETED",
-            description=f"Multi-provider search completed. Found {len(final_candidates)} deduplicated source candidates."
+            description=f"Multi-provider search completed. Found {len(final_candidates)} deduplicated source candidates.",
+            metadata_json={"results_count": len(final_candidates)}
         )
 
         formatted_candidates = []
         for cand in final_candidates:
-            # Check if evidence is dict and stringify
-            evidence_str = json.dumps(cand["evidence"]) if isinstance(cand["evidence"], dict) else str(cand["evidence"])
-            
+            # Parse snippet details
+            snippet = ""
+            if cand.get("evidence"):
+                if isinstance(cand["evidence"], dict):
+                    snippet = cand["evidence"].get("snippet", "")
+                else:
+                    snippet = str(cand["evidence"])
+
+            evidence_dict = {
+                "query": cand.get("query") or (cand.get("queries")[0] if cand.get("queries") else ""),
+                "queries": cand.get("queries", []),
+                "providers": cand.get("providers", [cand.get("discovery_method", "web_search")]),
+                "snippet": snippet,
+                "discovery_date": datetime.utcnow().isoformat() + "Z",
+                "relevance": cand.get("similarity_score", 1.0),
+                "confidence": cand.get("confidence", "medium")
+            }
+
             formatted_candidates.append({
                 "url": cand["url"],
                 "domain": cand["domain"],
@@ -114,7 +121,7 @@ class SourceTracingService:
                 "discovery_method": cand["discovery_method"],
                 "similarity_score": cand["similarity_score"],
                 "confidence": cand["confidence"],
-                "evidence": evidence_str
+                "evidence": json.dumps(evidence_dict)
             })
 
         return formatted_candidates

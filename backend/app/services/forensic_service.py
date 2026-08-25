@@ -47,11 +47,12 @@ class ForensicService:
         """
         Executes ffprobe to extract rich stream metadata, codecs, container info, and audio parameters.
         """
+        import os
         import shutil
         import subprocess
         ffprobe_bin = shutil.which("ffprobe")
         if not ffprobe_bin:
-            ffprobe_bin = r"C:\ffmpeg\bin\ffprobe.exe"
+            ffprobe_bin = r"C:\ffmpeg\bin\ffprobe.exe" if os.name == "nt" else "ffprobe"
             
         cmd = [
             ffprobe_bin,
@@ -158,6 +159,16 @@ class ForensicService:
             enhanced = ImageEnhance.Brightness(diff).enhance(scale)
             enhanced.save(ela_path_abs)
             
+            # Upload ELA map to Supabase private storage
+            from backend.app.database import db_manager
+            if db_manager.use_supabase:
+                try:
+                    with open(ela_path_abs, "rb") as f_ela:
+                        db_manager.upload_media_to_supabase(f_ela.read(), f"ela/{ela_filename}", "image/jpeg")
+                    ela_path = f"ela/{ela_filename}"
+                except Exception as e_upload:
+                    print(f"[STORAGE] Failed to upload ELA map to Supabase: {e_upload}")
+            
             # Clean up temp
             if os.path.exists(temp_path):
                 os.remove(temp_path)
@@ -169,6 +180,13 @@ class ForensicService:
             std_dev_val = float(std_dev[0][0])
             ela_score = min(std_dev_val * 4, 100.0)
             
+            # Add ela_image_path and frame_path as compatibility keys in finding evidence
+            evidence_data = {
+                "ela_image_path": ela_path,
+                "frame_path": ela_path,  # compatibility key
+                "ela_anomaly_score": ela_score
+            }
+            
             if ela_score > 35.0:
                 ela_anomaly_detected = True
                 findings.append({
@@ -178,7 +196,7 @@ class ForensicService:
                     "severity": "medium",
                     "confidence": "medium",
                     "method": "Error Level Analysis",
-                    "evidence": {"ela_image_path": ela_path, "ela_anomaly_score": ela_score}
+                    "evidence": evidence_data
                 })
             else:
                 findings.append({
@@ -188,20 +206,45 @@ class ForensicService:
                     "severity": "info",
                     "confidence": "high",
                     "method": "Error Level Analysis",
-                    "evidence": {"ela_image_path": ela_path, "ela_anomaly_score": ela_score}
+                    "evidence": evidence_data
                 })
         except Exception as e:
             print(f"[FORENSICS] ELA execution failed: {e}")
             
         # 2. Metadata Check
         metadata = ForensicService.extract_image_metadata(filepath)
+        metadata_consolidated = {
+            "duration_s": 0.0,
+            "format": metadata.get("format"),
+            "container": metadata.get("format"),
+            "codec": metadata.get("format"),
+            "width": metadata.get("width"),
+            "height": metadata.get("height"),
+            "fps": 0.0,
+            "bitrate": 0,
+            "audio_codec": None,
+            "audio_sample_rate": 0,
+            "audio_channels": 0,
+            "creation_timestamp": metadata.get("creation_date"),
+            "raw_metadata": metadata.get("raw_tags")
+        }
+        findings.append({
+            "category": "metadata",
+            "evidence_level": "OBSERVED",
+            "finding": f"Image metadata parsed. Format: {metadata.get('format')}, Resolution: {metadata.get('width')}x{metadata.get('height')}.",
+            "severity": "info",
+            "confidence": "high",
+            "method": "EXIF & Image Header Parsing",
+            "evidence": metadata_consolidated
+        })
+        
+        # Additional software indicator finding if software exists
         software = metadata.get("software")
         if software:
-            # Metadata explicitly lists editing software
             editing_suites = ["photoshop", "gimp", "illustrator", "canva", "lightroom", "picsart", "snapseed"]
             is_suite = any(suite in software.lower() for suite in editing_suites)
             findings.append({
-                "category": "metadata",
+                "category": "metadata_software",
                 "evidence_level": "OBSERVED",
                 "finding": f"Image metadata indicates modification software signature: {software}.",
                 "severity": "high" if is_suite else "medium",
@@ -249,6 +292,19 @@ class ForensicService:
                 })
         except Exception as e:
             print(f"[FORENSICS] Noise analysis failed: {e}")
+
+        # 5. Calculate and save asset-level perceptual hashes
+        p_hash = ForensicService.calculate_perceptual_hash(filepath, "image")
+        a_hash = ForensicService.calculate_average_hash(filepath, "image")
+        findings.append({
+            "category": "perceptual_hashes",
+            "evidence_level": "OBSERVED",
+            "finding": f"Media perceptual hashes generated (pHash: {p_hash}, aHash: {a_hash}).",
+            "severity": "info",
+            "confidence": "high",
+            "method": "Perceptual Image Hashing",
+            "evidence": {"pHash": p_hash, "aHash": a_hash}
+        })
             
         return {
             "ela_path": ela_path,
@@ -299,22 +355,43 @@ class ForensicService:
                 duration = v_stream.get("duration") or ffprobe_data.get("format", {}).get("duration")
                 if duration:
                     metadata["duration_s"] = float(duration)
-                    
-                findings.append({
-                    "category": "metadata",
-                    "evidence_level": "OBSERVED",
-                    "finding": f"Video stream codec identified: {metadata['codec'].upper()} ({metadata['width']}x{metadata['height']} @ {metadata['fps']:.2f} FPS).",
-                    "severity": "info",
-                    "confidence": "high",
-                    "method": "ffprobe Video Stream Inspection",
-                    "evidence": v_stream
-                })
             
             # Extract audio stream parameters
             a_stream = next((s for s in ffprobe_data.get("streams", []) if s.get("codec_type") == "audio"), None)
             if a_stream:
                 metadata["audio_codec"] = a_stream.get("codec_name", "unknown")
                 metadata["audio_channels"] = int(a_stream.get("channels", 0))
+                
+            # Build unified metadata finding
+            metadata_consolidated = {
+                "duration_s": metadata.get("duration_s", 0.0),
+                "format": ffprobe_data.get("format", {}).get("format_name", "unknown"),
+                "container": ffprobe_data.get("format", {}).get("format_long_name", "unknown"),
+                "codec": metadata.get("codec", "unknown"),
+                "width": metadata.get("width", 0),
+                "height": metadata.get("height", 0),
+                "fps": metadata.get("fps", 0.0),
+                "bitrate": int(ffprobe_data.get("format", {}).get("bit_rate") or 0),
+                "audio_codec": metadata.get("audio_codec"),
+                "audio_sample_rate": int(a_stream.get("sample_rate") or 0) if a_stream else 0,
+                "audio_channels": metadata.get("audio_channels", 0),
+                "creation_timestamp": (v_stream.get("tags", {}).get("creation_time") or 
+                                       ffprobe_data.get("format", {}).get("tags", {}).get("creation_time") if v_stream else None),
+                "raw_metadata": ffprobe_data
+            }
+            
+            findings.append({
+                "category": "metadata",
+                "evidence_level": "OBSERVED",
+                "finding": f"Video stream codec identified: {metadata['codec'].upper()} ({metadata['width']}x{metadata['height']} @ {metadata['fps']:.2f} FPS).",
+                "severity": "info",
+                "confidence": "high",
+                "method": "ffprobe Video Stream Inspection",
+                "evidence": metadata_consolidated
+            })
+            
+            # Save audio track details if audio exists
+            if a_stream:
                 findings.append({
                     "category": "audio",
                     "evidence_level": "OBSERVED",
@@ -370,6 +447,16 @@ class ForensicService:
                     frame_path_abs = os.path.join(frames_dir, frame_filename)
                     cv2.imwrite(frame_path_abs, frame)
                     
+                    # Upload frame to Supabase private storage
+                    from backend.app.database import db_manager
+                    frame_storage_path = f"frames/{video_filename}/{frame_filename}"
+                    if db_manager.use_supabase:
+                        try:
+                            with open(frame_path_abs, "rb") as f_frame:
+                                db_manager.upload_media_to_supabase(f_frame.read(), frame_storage_path, "image/jpeg")
+                        except Exception as e_upload:
+                            print(f"[STORAGE] Failed to upload frame to Supabase: {e_upload}")
+                    
                     # Compute frame statistics
                     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                     mean_brightness = float(np.mean(gray))
@@ -386,12 +473,20 @@ class ForensicService:
                     except Exception as e_hash:
                         print(f"[FORENSICS] Frame hash error: {e_hash}")
                     
+                    frame_url_path = frame_storage_path if db_manager.use_supabase else f"/static/uploads/frames/{video_filename}/{frame_filename}"
+                    
                     frames_data.append({
-                        "frame_index": current_frame_idx,
-                        "timestamp_s": round(current_frame_idx / metadata["fps"], 2) if metadata["fps"] > 0 else 0,
-                        "storage_path": f"/static/uploads/frames/{video_filename}/{frame_filename}",
+                        "frame_number": current_frame_idx,
+                        "timestamp": round(current_frame_idx / metadata["fps"], 2) if metadata["fps"] > 0 else 0,
+                        "storage_path": frame_url_path,
+                        "frame_path": frame_url_path, # compatibility key
                         "brightness": mean_brightness,
                         "variance": variance,
+                        "pHash": f_phash,
+                        "aHash": f_ahash,
+                        # compatibility keys
+                        "frame_index": current_frame_idx,
+                        "timestamp_s": round(current_frame_idx / metadata["fps"], 2) if metadata["fps"] > 0 else 0,
                         "perceptual_hash": f_phash,
                         "average_hash": f_ahash
                     })
@@ -399,6 +494,20 @@ class ForensicService:
                 current_frame_idx += 1
                 
             cap.release()
+
+            # Calculate and save asset-level perceptual hashes using the first sampled frame
+            if frames_data:
+                p_hash = frames_data[0].get("pHash")
+                a_hash = frames_data[0].get("aHash")
+                findings.append({
+                    "category": "perceptual_hashes",
+                    "evidence_level": "OBSERVED",
+                    "finding": f"Media perceptual hashes generated from representative frame (pHash: {p_hash}, aHash: {a_hash}).",
+                    "severity": "info",
+                    "confidence": "high",
+                    "method": "Perceptual Image Hashing",
+                    "evidence": {"pHash": p_hash, "aHash": a_hash}
+                })
             
             # Anomaly check: sudden brightness/frame jumps
             if len(frames_data) > 1:

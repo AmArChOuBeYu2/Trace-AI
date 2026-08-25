@@ -49,14 +49,16 @@ def test_ela_forensics():
 
 def test_database_case_creation():
     # Direct database CRUD test using SQLite/Supabase abstraction
+    import time
+    case_num = f"TEST-{int(time.time())}"
     inv = db_manager.create_investigation(
         title="Test Automated Case Runs",
         description="Verify backend DB persistence handles standard inputs.",
-        case_number="TEST-9999"
+        case_number=case_num
     )
     assert inv is not None
     assert inv["title"] == "Test Automated Case Runs"
-    assert inv["case_number"] == "TEST-9999"
+    assert inv["case_number"] == case_num
     
     # Verify retrieval
     retrieved = db_manager.get_investigation(inv["id"])

@@ -17,6 +17,7 @@ class Investigation(Base):
     description = Column(Text, nullable=True)
     status = Column(String(50), default="active") # active, completed, archived
     risk_level = Column(String(50), default="low") # low, medium, high, critical
+    analyst_intent = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -140,3 +141,13 @@ class AuditEvent(Base):
     description = Column(Text, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
     metadata_json = Column(Text, nullable=True)
+
+class AnalystNote(Base):
+    __tablename__ = "analyst_notes"
+    
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    investigation_id = Column(String(36), ForeignKey("investigations.id", ondelete="CASCADE"), nullable=False)
+    note = Column(Text, nullable=False)
+    author = Column(String(255), default="System Operator")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

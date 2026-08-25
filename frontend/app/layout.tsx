@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import "./globals.css";
 import Sidebar from "@/components/sidebar";
+import TopBar from "@/components/topbar";
 
 export const metadata: Metadata = {
   title: "TRACE-AI | Forensic Intelligence Platform",
@@ -18,10 +20,15 @@ export default function RootLayout({
       className="h-full antialiased"
     >
       <body className="min-h-screen bg-slate-50 text-slate-800 flex overflow-hidden">
-        <Sidebar />
-        <main className="flex-1 flex flex-col h-screen overflow-y-auto bg-slate-50 animate-fade-in">
-          {children}
-        </main>
+        <Suspense fallback={<div className="w-64 bg-white border-r border-slate-200" />}>
+          <Sidebar />
+        </Suspense>
+        <div className="flex-1 flex flex-col h-screen overflow-hidden">
+          <TopBar />
+          <main className="flex-1 overflow-y-auto bg-slate-50 animate-fade-in">
+            {children}
+          </main>
+        </div>
       </body>
     </html>
   );
