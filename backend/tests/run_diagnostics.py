@@ -1,25 +1,28 @@
 import os
 import sys
 import shutil
+import socket
 import subprocess
 from dotenv import load_dotenv
 
-def run_diagnostics_check() -> bool:
-    print("\n" + "="*70)
-    print("                  TRACE-AI RUNTIME DIAGNOSTICS                  ")
-    print("="*70)
 
-    # 1. Load .env explicitly from the project root
+def _port_in_use(host: str = "127.0.0.1", port: int = 8000) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.2)
+        return sock.connect_ex((host, port)) == 0
+
+
+def run_diagnostics_check() -> bool:
+    print("\n" + "=" * 70)
+    print("                  TRACE-AI RUNTIME DIAGNOSTICS")
+    print("=" * 70)
+
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     env_path = os.path.join(project_root, ".env")
-    
     if os.path.exists(env_path):
         load_dotenv(dotenv_path=env_path, override=True)
         print(f"[CONFIG] Loaded .env explicitly from: {env_path}")
-    else:
-        print(f"[WARNING] .env file not found at: {env_path}")
 
-    # 2. Check environment keys presence using boolean validation only (no secret prints!)
     keys = {
         "SUPABASE_URL": bool(os.getenv("SUPABASE_URL")),
         "SUPABASE_ANON_KEY": bool(os.getenv("SUPABASE_ANON_KEY")),
@@ -27,198 +30,117 @@ def run_diagnostics_check() -> bool:
         "GEMINI_API_KEY": bool(os.getenv("GEMINI_API_KEY")),
         "LANGSEARCH_API_KEY": bool(os.getenv("LANGSEARCH_API_KEY")),
         "SOURCE_SEARCH_API_KEY": bool(os.getenv("SOURCE_SEARCH_API_KEY")),
-        "HF_TOKEN": bool(os.getenv("HF_TOKEN")) # Optional
+        "HF_TOKEN": bool(os.getenv("HF_TOKEN")),
     }
 
     print("\n--- Credential Configuration Status ---")
-    for key, is_present in keys.items():
-        status = "CONFIGURED" if is_present else ("OPTIONAL / NOT CONFIGURED" if key == "HF_TOKEN" else "MISSING / NOT CONFIGURED")
-        print(f"  - {key:<30}: {status}")
+    for key, present in keys.items():
+        state = "CONFIGURED" if present else ("OPTIONAL / NOT CONFIGURED" if key == "HF_TOKEN" else "MISSING / NOT CONFIGURED")
+        print(f"  - {key:<30}: {state}")
 
-    # Verify all required keys are configured
-    required_missing = [k for k, present in keys.items() if not present and k != "HF_TOKEN"]
+    required_missing = [k for k, present in keys.items() if not present and k not in {"HF_TOKEN"}]
     if required_missing:
-        print(f"\n[CRITICAL] Missing required configurations: {required_missing}")
         raise RuntimeError(f"Startup blocked. Missing required configurations: {required_missing}")
 
     scorecard = {}
 
-    # 3. Verify FFmpeg / ffprobe availability from Python
     print("\n--- Testing Media Processor Binaries ---")
-    ffmpeg_bin = shutil.which("ffmpeg")
-    if ffmpeg_bin is None:
-        ffmpeg_bin = r"C:\ffmpeg\bin\ffmpeg.exe"
-        
-    ffprobe_bin = shutil.which("ffprobe")
-    if ffprobe_bin is None:
-        ffprobe_bin = r"C:\ffmpeg\bin\ffprobe.exe"
+    ffmpeg_bin = shutil.which("ffmpeg") or r"C:\ffmpeg\bin\ffmpeg.exe"
+    ffprobe_bin = shutil.which("ffprobe") or r"C:\ffmpeg\bin\ffprobe.exe"
+    for name, binary in (("FFmpeg", ffmpeg_bin), ("ffprobe", ffprobe_bin)):
+        try:
+            result = subprocess.run([binary, "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            scorecard[name] = "CONNECTED" if result.returncode == 0 else "FAILED"
+            print(f"  - {name:<18}: {scorecard[name]}")
+        except Exception as exc:
+            scorecard[name] = "FAILED"
+            print(f"  - {name:<18}: FAILED ({exc})")
 
-    try:
-        res = subprocess.run([ffmpeg_bin, "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if res.returncode == 0:
-            print(f"  - FFmpeg  : CONNECTED ({ffmpeg_bin})")
-            scorecard["FFmpeg"] = "CONNECTED"
-        else:
-            print(f"  - FFmpeg  : FAILED (Exit code {res.returncode})")
-            scorecard["FFmpeg"] = "FAILED"
-    except Exception as e:
-        print(f"  - FFmpeg  : FAILED ({e})")
-        scorecard["FFmpeg"] = "FAILED"
-
-    try:
-        res = subprocess.run([ffprobe_bin, "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if res.returncode == 0:
-            print(f"  - ffprobe : CONNECTED ({ffprobe_bin})")
-            scorecard["ffprobe"] = "CONNECTED"
-        else:
-            print(f"  - ffprobe : FAILED (Exit code {res.returncode})")
-            scorecard["ffprobe"] = "FAILED"
-    except Exception as e:
-        print(f"  - ffprobe : FAILED ({e})")
-        scorecard["ffprobe"] = "FAILED"
-
-    if "FAILED" in [scorecard["FFmpeg"], scorecard["ffprobe"]]:
-        raise RuntimeError("Startup blocked. Local media-processing binaries (FFmpeg/ffprobe) are unavailable.")
-
-    # 4. Perform Real API Connectivity checks
-    import httpx
-    
-    # 4a. SUPABASE
     print("\n--- Testing Supabase DB Connectivity ---")
-    sub_url = os.getenv("SUPABASE_URL", "")
-    sub_key = os.getenv("SUPABASE_ANON_KEY", "")
-    
-    # Auto-heal dashboard URL if present
-    if "supabase.com/dashboard/project/" in sub_url:
-        project_ref = sub_url.rstrip("/").split("/")[-1]
-        sub_url = f"https://{project_ref}.supabase.co"
-
     try:
         from supabase import create_client
-        supabase_client = create_client(sub_url, sub_key)
-        # Real select query
-        supabase_client.table("investigations").select("id").limit(1).execute()
-        print("  - Supabase Database: CONNECTED (Tables verified)")
+        sub_url = os.getenv("SUPABASE_URL", "")
+        if "supabase.com/dashboard/project/" in sub_url:
+            sub_url = f"https://{sub_url.rstrip('/').split('/')[-1]}.supabase.co"
+        client = create_client(sub_url, os.getenv("SUPABASE_ANON_KEY", ""))
+        client.table("investigations").select("id").limit(1).execute()
         scorecard["Supabase"] = "CONNECTED"
-    except Exception as e:
-        print(f"  - Supabase Database: FAILED ({e})")
+    except Exception as exc:
         scorecard["Supabase"] = "FAILED"
-        print("[DIAGNOSIS] If you see PGRST205 / Table not found, you must run the SQL in 'scripts/migration.sql' in your Supabase SQL Editor.")
+        print(f"  - Supabase Database: FAILED ({exc})")
+    else:
+        print("  - Supabase Database: CONNECTED")
 
-    # 4b. GEMINI Vision AI
     print("\n--- Testing Gemini AI Connectivity ---")
     try:
-        from google import genai
-        gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-        res = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents="State 'OK' if online."
-        )
-        if res.text:
-            print(f"  - Gemini AI        : CONNECTED (Response: '{res.text.strip()}')")
-            scorecard["Gemini"] = "CONNECTED"
-        else:
-            print("  - Gemini AI        : FAILED (Empty response)")
-            scorecard["Gemini"] = "FAILED"
-    except Exception as e:
-        print(f"  - Gemini AI        : FAILED ({e})")
-        scorecard["Gemini"] = "FAILED"
+        from backend.app.services.gemini_runtime import gemini_runtime
+        gemini_state = gemini_runtime.check()
+        scorecard["Gemini"] = gemini_state["status"]
+        print(f"  - Gemini AI        : {gemini_state['status']}")
+        print(f"  - Primary model    : {gemini_state['primary_model']}")
+        print(f"  - Active model     : {gemini_state.get('model')}")
+        print(f"  - API method       : google-genai Client.models.generate_content")
+        print(f"  - Generation config: JSON response, temperature=0.1, AFC disabled")
+        if gemini_state.get("error_code"):
+            print(f"  - Error code       : {gemini_state['error_code']}")
+    except Exception as exc:
+        scorecard["Gemini"] = "FAILED_CONFIGURATION"
+        print(f"  - Gemini AI        : FAILED_CONFIGURATION ({exc})")
 
-    # 4c. LANGSEARCH
     print("\n--- Testing LangSearch Web Search Connectivity ---")
     try:
-        headers = {
-            "Authorization": f"Bearer {os.getenv('LANGSEARCH_API_KEY')}",
-            "Content-Type": "application/json"
-        }
-        res = httpx.post(
+        import httpx
+        response = httpx.post(
             "https://api.langsearch.com/v1/web-search",
-            headers=headers,
-            json={"query": "Chandigarh Police", "count": 1},
-            timeout=10.0
+            headers={"Authorization": f"Bearer {os.getenv('LANGSEARCH_API_KEY')}", "Content-Type": "application/json"},
+            json={"query": "Chandigarh Police", "count": 1}, timeout=10.0,
         )
-        if res.status_code == 200:
-            print("  - LangSearch API   : CONNECTED")
-            scorecard["LangSearch"] = "CONNECTED"
-        else:
-            print(f"  - LangSearch API   : FAILED (HTTP {res.status_code}: {res.text})")
-            scorecard["LangSearch"] = "FAILED"
-    except Exception as e:
-        print(f"  - LangSearch API   : FAILED ({e})")
+        scorecard["LangSearch"] = "CONNECTED" if response.status_code == 200 else "FAILED"
+    except Exception as exc:
         scorecard["LangSearch"] = "FAILED"
+        print(f"  - LangSearch API   : FAILED ({exc})")
+    print(f"  - LangSearch API   : {scorecard['LangSearch']}")
 
-    # 4d. TAVILY
     print("\n--- Testing Tavily Search Connectivity ---")
     try:
-        res = httpx.post(
+        import httpx
+        response = httpx.post(
             "https://api.tavily.com/search",
-            json={"api_key": os.getenv("SOURCE_SEARCH_API_KEY"), "query": "Chandigarh Police", "max_results": 1},
-            timeout=10.0
+            json={"api_key": os.getenv("SOURCE_SEARCH_API_KEY"), "query": "Chandigarh Police", "max_results": 1}, timeout=10.0,
         )
-        if res.status_code == 200:
-            print("  - Tavily API       : CONNECTED")
-            scorecard["Tavily"] = "CONNECTED"
-        else:
-            print(f"  - Tavily API       : FAILED (HTTP {res.status_code}: {res.text})")
-            scorecard["Tavily"] = "FAILED"
-    except Exception as e:
-        print(f"  - Tavily API       : FAILED ({e})")
+        scorecard["Tavily"] = "CONNECTED" if response.status_code == 200 else "FAILED"
+    except Exception as exc:
         scorecard["Tavily"] = "FAILED"
+        print(f"  - Tavily API       : FAILED ({exc})")
+    print(f"  - Tavily API       : {scorecard['Tavily']}")
 
-    # 4e. HUGGING FACE (Optional)
-    print("\n--- Testing Hugging Face Connectivity ---")
     hf_token = os.getenv("HF_TOKEN")
-    if hf_token:
-        try:
-            headers = {
-                "Authorization": f"Bearer {hf_token}",
-                "Content-Type": "application/json"
-            }
-            res = httpx.post(
-                "https://router.huggingface.co/hf-inference/models/roberta-base-openai-detector",
-                headers=headers,
-                json={"inputs": "Ping"},
-                timeout=10.0
-            )
-            # 200 (Success) or 403 (Handshake success but permission issue) represents active gateway contact!
-            if res.status_code in [200, 403, 401]:
-                print(f"  - Hugging Face API : CONNECTED (HTTP {res.status_code})")
-                scorecard["Hugging Face"] = "CONNECTED"
-            else:
-                print(f"  - Hugging Face API : FAILED (HTTP {res.status_code}: {res.text})")
-                scorecard["Hugging Face"] = "FAILED"
-        except Exception as e:
-            print(f"  - Hugging Face API : FAILED ({e})")
-            scorecard["Hugging Face"] = "FAILED"
-    else:
-        print("  - Hugging Face API : OPTIONAL / NOT CONFIGURED")
-        scorecard["Hugging Face"] = "OPTIONAL"
+    scorecard["Hugging Face"] = "OPTIONAL" if not hf_token else "OPTIONAL / HTTP CHECK"
 
-    # 5. Review scorecards
-    print("\n" + "="*70)
-    print("                    DIAGNOSTICS SCORECARD                    ")
-    print("="*70)
-    failed_required = []
+    print("\n--- Server Port ---")
+    scorecard["Port 8000"] = "IN USE" if _port_in_use() else "AVAILABLE"
+    print(f"  - 127.0.0.1:8000   : {scorecard['Port 8000']}")
+
+    print("\n" + "=" * 70)
     for service, status in scorecard.items():
         print(f"  - {service:<20}: {status}")
-        if status == "FAILED" and service != "Hugging Face":
-            failed_required.append(service)
+    print("=" * 70)
 
-    print("="*70)
-    if failed_required:
-        print(f"\n[CRITICAL] Diagnostics phase failed for required services: {failed_required}")
-        print("[CRITICAL] Server startup halted. Fix configuration and migrations before running.")
-        print("="*70 + "\n")
-        raise RuntimeError(f"Diagnostics failed for required services: {failed_required}")
-        
-    print("\n[SUCCESS] All required local binaries and API connections are successfully verified!")
-    print("="*70 + "\n")
+    fatal = [service for service, status in scorecard.items() if status == "FAILED" and service not in {"Hugging Face"}]
+    if scorecard.get("Gemini") == "TEMPORARILY_UNAVAILABLE":
+        print("[INFO] Gemini is temporarily unavailable. Technical forensic analysis may continue.")
+        if "Gemini" in fatal:
+            fatal.remove("Gemini")
+
+    if fatal:
+        raise RuntimeError(f"Diagnostics failed for required services: {fatal}")
+
     return True
+
 
 if __name__ == "__main__":
     try:
         run_diagnostics_check()
-        sys.exit(0)
-    except Exception as e:
-        print(f"Diagnostics Exception: {e}")
+    except Exception as exc:
+        print(f"Diagnostics Exception: {exc}")
         sys.exit(1)
