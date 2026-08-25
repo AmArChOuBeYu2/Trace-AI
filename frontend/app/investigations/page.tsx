@@ -11,6 +11,7 @@ import {
   FolderOpen,
   Plus
 } from "lucide-react";
+import { API_BASE_URL } from "@/config";
 
 interface Investigation {
   id: string;
@@ -30,7 +31,7 @@ export default function InvestigationsList() {
   const [errorMsg, setErrorMsg] = useState("");
 
   useEffect(() => {
-    fetch("http://localhost:8000/api/investigations")
+    fetch(`${API_BASE_URL}/api/investigations`)
       .then((res) => {
         if (!res.ok) throw new Error("API server returned an error.");
         return res.json();

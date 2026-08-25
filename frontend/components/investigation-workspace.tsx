@@ -33,6 +33,7 @@ import {
 } from "lucide-react";
 import PropagationFlow from "./propagation-flow";
 import EmptyState from "./empty-state";
+import { API_BASE_URL } from "@/config";
 
 interface Finding {
   id: string;
@@ -197,7 +198,7 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
   const fetchAssessment = async () => {
     if (isDemo) return;
     try {
-      const res = await fetch(`http://localhost:8000/api/investigations/${data.investigation.id}/assessment`);
+      const res = await fetch(`${API_BASE_URL}/api/investigations/${data.investigation.id}/assessment`);
       if (res.ok) {
         const payload = await res.json();
         setAssessment(payload);
@@ -210,7 +211,7 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
   const getMediaUrl = (path: string) => {
     if (!path) return "";
     if (path.startsWith("http")) return path;
-    return `http://localhost:8000${path.startsWith("/") ? "" : "/"}${path}`;
+    return `${API_BASE_URL}${path.startsWith("/") ? "" : "/"}${path}`;
   };
 
   const fetchMediaUrl = async (force = false) => {
@@ -223,7 +224,7 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
     
     setMediaUrlStatus("LOADING");
     try {
-      const res = await fetch(`http://localhost:8000/api/media/${data.media.id}/access-url`);
+      const res = await fetch(`${API_BASE_URL}/api/media/${data.media.id}/access-url`);
       if (res.ok) {
         const payload = await res.json();
         setMediaUrl(payload.url);
@@ -242,7 +243,7 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
     if (isDemo) return;
     
     // Fetch weights
-    fetch("http://localhost:8000/api/settings/weights")
+    fetch(`${API_BASE_URL}/api/settings/weights`)
       .then(res => res.json())
       .then(w => {
         setWManip(w.media_manipulation);
@@ -253,7 +254,7 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
       .catch(e => console.error("Error loading weights:", e));
       
     // Fetch notes
-    fetch(`http://localhost:8000/api/investigations/${data.investigation.id}/notes`)
+    fetch(`${API_BASE_URL}/api/investigations/${data.investigation.id}/notes`)
       .then(res => res.json())
       .then(n => {
         if (n && n.note) {
@@ -264,7 +265,7 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
       .catch(e => console.error("Error loading notes:", e));
       
     // Fetch intent override or fallback to default intent finding
-    fetch(`http://localhost:8000/api/investigations/${data.investigation.id}`)
+    fetch(`${API_BASE_URL}/api/investigations/${data.investigation.id}`)
       .then(res => res.json())
       .then(inv => {
         if (inv && inv.analyst_intent) {
@@ -300,7 +301,7 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
     if (isDemo) return;
     setSavingWeights(true);
     try {
-      const res = await fetch("http://localhost:8000/api/settings/weights", {
+      const res = await fetch(`${API_BASE_URL}/api/settings/weights`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -328,7 +329,7 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
     if (isDemo) return;
     setSavingNotes(true);
     try {
-      const res = await fetch(`http://localhost:8000/api/investigations/${data.investigation.id}/notes`, {
+      const res = await fetch(`${API_BASE_URL}/api/investigations/${data.investigation.id}/notes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ note: notes, author: "System Operator" })
@@ -347,7 +348,7 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
     if (isDemo) return;
     setCommunicationIntent(intent as any);
     try {
-      await fetch(`http://localhost:8000/api/investigations/${data.investigation.id}/intent`, {
+      await fetch(`${API_BASE_URL}/api/investigations/${data.investigation.id}/intent`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ intent })
@@ -459,13 +460,13 @@ export default function InvestigationWorkspace({ data, isDemo = false, onManualS
   // Export report PDF/JSON data
   const handleExportReport = async () => {
     try {
-      const res = await fetch(`http://localhost:8000/api/investigations/${data.investigation.id}/report`, {
+      const res = await fetch(`${API_BASE_URL}/api/investigations/${data.investigation.id}/report`, {
         method: "POST"
       });
       if (res.ok) {
         const rep = await res.json();
         // Trigger file download
-        const fullUrl = `http://localhost:8000${rep.report_path}`;
+        const fullUrl = `${API_BASE_URL}${rep.report_path}`;
         window.open(fullUrl, "_blank");
       }
     } catch (e) {

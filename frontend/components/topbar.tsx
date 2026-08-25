@@ -4,6 +4,7 @@ import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Shield, Search, Plus, Upload, Activity } from "lucide-react";
+import { API_BASE_URL } from "@/config";
 
 export default function TopBar() {
   const pathname = usePathname();
@@ -22,7 +23,7 @@ export default function TopBar() {
       });
     } else if (isInvestigationPage) {
       const caseId = segments[2];
-      fetch(`http://localhost:8000/api/investigations/${caseId}`)
+      fetch(`${API_BASE_URL}/api/investigations/${caseId}`)
         .then((res) => {
           if (!res.ok) throw new Error();
           return res.json();

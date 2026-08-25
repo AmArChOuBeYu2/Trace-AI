@@ -1,12 +1,15 @@
 fastapi>=0.100.0
 uvicorn>=0.20.0
 python-multipart>=0.0.6
+sqlalchemy>=2.0.0
 supabase>=2.0.0
 google-genai>=0.1.0
 opencv-python-headless>=4.7.0
+numpy>=1.20.0
 pillow>=9.5.0
 exifread>=3.0.0
 imagehash>=4.3.0
+httpx>=0.24.0
 requests>=2.31.0
 python-dotenv>=1.0.0
 pytest>=7.0.0

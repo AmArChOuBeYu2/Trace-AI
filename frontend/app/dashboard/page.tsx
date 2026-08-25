@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import EmptyState from "@/components/empty-state";
 import ErrorState from "@/components/error-state";
+import { API_BASE_URL } from "@/config";
 
 interface Investigation {
   id: string;
@@ -38,7 +39,7 @@ export default function Dashboard() {
   const [backendStatus, setBackendStatus] = useState("checking");
 
   useEffect(() => {
-    fetch("http://localhost:8000/api/investigations")
+    fetch(`${API_BASE_URL}/api/investigations`)
       .then((res) => {
         if (!res.ok) throw new Error("API server returned an error.");
         return res.json();
@@ -50,7 +51,7 @@ export default function Dashboard() {
 
         // Fetch sources count dynamically for each investigation
         Promise.all(data.map(inv => 
-          fetch(`http://localhost:8000/api/investigations/${inv.id}/sources`)
+          fetch(`${API_BASE_URL}/api/investigations/${inv.id}/sources`)
             .then(res => res.ok ? res.json() : [])
             .then(sources => sources.length)
             .catch(() => 0)

@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { Loader2, ArrowLeft } from "lucide-react";
 import Link from "next/link";
 import InvestigationWorkspace, { WorkspaceData } from "@/components/investigation-workspace";
+import { API_BASE_URL } from "@/config";
 
 export default function InvestigationDetailPage() {
   const params = useParams();
@@ -18,12 +19,12 @@ export default function InvestigationDetailPage() {
   const fetchCaseDetails = async () => {
     try {
       // 1. Fetch case metadata
-      const invRes = await fetch(`http://localhost:8000/api/investigations/${invId}`);
+      const invRes = await fetch(`${API_BASE_URL}/api/investigations/${invId}`);
       if (!invRes.ok) throw new Error("Failed to load investigation details");
       const investigation = await invRes.json();
 
       // 2. Fetch media assets
-      const mediaRes = await fetch(`http://localhost:8000/api/investigations/${invId}/media`);
+      const mediaRes = await fetch(`${API_BASE_URL}/api/investigations/${invId}/media`);
       if (!mediaRes.ok) throw new Error("Failed to load media assets");
       const mediaList = await mediaRes.json();
       const media = mediaList[0] || null;
@@ -33,26 +34,26 @@ export default function InvestigationDetailPage() {
 
       // 3. Fetch media details if present
       if (media) {
-        const findingsRes = await fetch(`http://localhost:8000/api/media/${media.id}/findings`);
+        const findingsRes = await fetch(`${API_BASE_URL}/api/media/${media.id}/findings`);
         if (findingsRes.ok) findings = await findingsRes.json();
 
-        const c2paRes = await fetch(`http://localhost:8000/api/media/${media.id}/provenance`);
+        const c2paRes = await fetch(`${API_BASE_URL}/api/media/${media.id}/provenance`);
         if (c2paRes.ok) c2pa = await c2paRes.json();
       }
 
       // 4. Fetch sources, propagation, narrative, and audits
-      const sourcesRes = await fetch(`http://localhost:8000/api/investigations/${invId}/sources`);
+      const sourcesRes = await fetch(`${API_BASE_URL}/api/investigations/${invId}/sources`);
       const sources = sourcesRes.ok ? await sourcesRes.json() : [];
 
-      const graphRes = await fetch(`http://localhost:8000/api/investigations/${invId}/graph`);
+      const graphRes = await fetch(`${API_BASE_URL}/api/investigations/${invId}/graph`);
       const graph = graphRes.ok ? await graphRes.json() : { nodes: [], edges: [] };
 
-      const narrativeRes = await fetch(`http://localhost:8000/api/investigations/${invId}/narrative`);
+      const narrativeRes = await fetch(`${API_BASE_URL}/api/investigations/${invId}/narrative`);
       const narrative = narrativeRes.ok 
         ? await narrativeRes.json() 
         : { versions: [], analysis: {} };
 
-      const auditRes = await fetch(`http://localhost:8000/api/investigations/${invId}/audit`);
+      const auditRes = await fetch(`${API_BASE_URL}/api/investigations/${invId}/audit`);
       const audit = auditRes.ok ? await auditRes.json() : [];
 
       setData({
@@ -83,7 +84,7 @@ export default function InvestigationDetailPage() {
     const formData = new FormData();
     formData.append("keywords", keywords);
     
-    const res = await fetch(`http://localhost:8000/api/investigations/${invId}/source-search`, {
+    const res = await fetch(`${API_BASE_URL}/api/investigations/${invId}/source-search`, {
       method: "POST",
       body: formData
     });

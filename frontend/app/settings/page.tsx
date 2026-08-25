@@ -11,6 +11,7 @@ import {
   Activity,
   Loader2
 } from "lucide-react";
+import { API_BASE_URL } from "@/config";
 
 interface Diagnostics {
   gemini: string;
@@ -42,7 +43,7 @@ export default function SettingsPage() {
   // 1. Fetch backend configurations & diagnostics on mount
   useEffect(() => {
     // Fetch diagnostics status
-    fetch("http://localhost:8000/api/settings/diagnostics")
+    fetch(`${API_BASE_URL}/api/settings/diagnostics`)
       .then(res => res.json())
       .then(data => {
         setDiagnostics(data);
@@ -62,7 +63,7 @@ export default function SettingsPage() {
       });
 
     // Fetch persisted weights
-    fetch("http://localhost:8000/api/settings/weights")
+    fetch(`${API_BASE_URL}/api/settings/weights`)
       .then(res => {
         if (!res.ok) throw new Error();
         return res.json();
@@ -91,7 +92,7 @@ export default function SettingsPage() {
     setSaved(false);
 
     try {
-      const res = await fetch("http://localhost:8000/api/settings/weights", {
+      const res = await fetch(`${API_BASE_URL}/api/settings/weights`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

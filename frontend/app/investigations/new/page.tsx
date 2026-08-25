@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { FolderPlus, ArrowLeft, ShieldAlert } from "lucide-react";
+import { API_BASE_URL } from "@/config";
 
 export default function NewInvestigation() {
   const router = useRouter();
@@ -26,7 +27,7 @@ export default function NewInvestigation() {
 
     try {
       // 1. Create the Investigation case
-      const res = await fetch("http://localhost:8000/api/investigations", {
+      const res = await fetch(`${API_BASE_URL}/api/investigations`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -48,7 +49,7 @@ export default function NewInvestigation() {
 
       // 2. Save investigator notes if provided
       if (notes.trim()) {
-        await fetch(`http://localhost:8000/api/investigations/${invId}/notes`, {
+        await fetch(`${API_BASE_URL}/api/investigations/${invId}/notes`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({

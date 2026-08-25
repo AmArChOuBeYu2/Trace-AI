@@ -13,6 +13,7 @@ import {
   ArrowLeft
 } from "lucide-react";
 import Link from "next/link";
+import { API_BASE_URL } from "@/config";
 
 function UploadPageContent() {
   const router = useRouter();
@@ -38,7 +39,7 @@ function UploadPageContent() {
   // Load existing investigation if ID is passed in query parameters
   useEffect(() => {
     if (investigationId) {
-      fetch(`http://localhost:8000/api/investigations/${investigationId}`)
+      fetch(`${API_BASE_URL}/api/investigations/${investigationId}`)
         .then(res => {
           if (!res.ok) throw new Error("Failed to load investigation details");
           return res.json();
@@ -115,12 +116,14 @@ function UploadPageContent() {
     setErrorMsg("");
 
     try {
-      let invId = investigationId;
+      let invId: string;
 
       // 1. If not attaching to an existing investigation, create a new one first
-      if (!invId) {
+      if (investigationId) {
+        invId = investigationId;
+      } else {
         setPipelineMessage("Creating new investigation case file entry...");
-        const caseRes = await fetch("http://localhost:8000/api/investigations", {
+        const caseRes = await fetch(`${API_BASE_URL}/api/investigations`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -136,16 +139,65 @@ function UploadPageContent() {
         invId = caseData.id;
       }
 
-      // 2. Upload media file and start analysis pipeline in one request
-      setPipelineMessage("Uploading original file to Supabase storage and enqueuing forensic pipeline...");
-      const formData = new FormData();
-      formData.append("file", file);
-      
-      const uploadRes = await fetch(`http://localhost:8000/api/investigations/${invId}/media`, {
+      // 2. Obtain signed upload details or fallback config
+      setPipelineMessage("Requesting secure storage upload authorization...");
+      const authRes = await fetch(`${API_BASE_URL}/api/investigations/${invId}/signed-upload-url`, {
         method: "POST",
-        body: formData
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filename: file.name,
+          mime_type: file.type
+        })
       });
-      if (!uploadRes.ok) throw new Error("File upload and analysis initiation failed.");
+      if (!authRes.ok) throw new Error("Failed to authorize secure file upload.");
+      const authData = await authRes.json();
+      
+      if (authData.provider === "supabase") {
+        setPipelineMessage("Uploading original media asset directly to private Supabase Storage...");
+        
+        // Upload directly via PUT to signed URL
+        const uploadResponse = await fetch(authData.url, {
+          method: "PUT",
+          headers: {
+            "Authorization": `Bearer ${authData.token}`,
+            "Content-Type": file.type
+          },
+          body: file
+        });
+        
+        if (!uploadResponse.ok) {
+          const errText = await uploadResponse.text().catch(() => "");
+          throw new Error(`Direct storage upload failed: ${errText || uploadResponse.statusText}`);
+        }
+        
+        setPipelineMessage("Registering upload metadata and enqueuing forensic pipeline checks...");
+        const registerRes = await fetch(`${API_BASE_URL}/api/investigations/${invId}/media-register`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            storage_path: authData.storage_path,
+            filename: file.name,
+            mime_type: file.type,
+            size_bytes: file.size
+          })
+        });
+        
+        if (!registerRes.ok) {
+          const errData = await registerRes.json().catch(() => ({}));
+          throw new Error(errData.detail || "Failed to register uploaded media in analysis pipeline.");
+        }
+      } else {
+        // Local fallback (CORS / local files)
+        setPipelineMessage("Uploading original file to local storage and enqueuing forensic pipeline...");
+        const formData = new FormData();
+        formData.append("file", file);
+        
+        const uploadRes = await fetch(`${API_BASE_URL}/api/investigations/${invId}/media`, {
+          method: "POST",
+          body: formData
+        });
+        if (!uploadRes.ok) throw new Error("File upload and analysis initiation failed.");
+      }
       
       setStatus("completed");
       setPipelineMessage("Analysis enqueued successfully! Redirecting...");
